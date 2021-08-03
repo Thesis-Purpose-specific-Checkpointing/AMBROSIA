@@ -3030,6 +3030,26 @@ namespace Ambrosia
                         }
                     }
                 }
+                
+                // Inserted code for checkpointing strategies
+                var shouldTakeCheckpoint = false;
+                switch (_checkpointingStrategy)
+                {
+                    case null:
+                        shouldTakeCheckpoint = false;
+                        break;
+                    case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID).Result;
+                        break;
+                    case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, null, null).Result;
+                        break;
+                    default:
+                        shouldTakeCheckpoint = false;
+                        break;
+                }
+                
+                
                 // Do the actual work on the local service
                 _localServiceSendToStream.Write(headerBuf, 0, Committer.HeaderSize);
                 _localServiceSendToStream.Write(tempBuf, 0, commitSize);
@@ -3173,16 +3193,6 @@ namespace Ambrosia
 
         private void ProcessSyncLocalMessage(ref FlexReadBuffer localServiceBuffer, FlexReadBuffer batchServiceBuffer)
         {
-            bool shouldTakeCheckpoint = false;
-            if (_checkpointingStrategy is StaticCheckpointingStrategy<AmbrosiaLogEntry>)
-            {
-                shouldTakeCheckpoint = ((StaticCheckpointingStrategy<AmbrosiaLogEntry>) _checkpointingStrategy).ShouldTakeCheckpoint(1).Result;
-            } else if (_checkpointingStrategy.GetType().IsInstanceOfType(typeof(StaticCheckpointingStrategy<AmbrosiaLogEntry>)))
-            {
-                // TODO: Implement DynamicCheckpointingStrategy and call it here (also alter the if-condition).
-                shouldTakeCheckpoint = false;
-            }
-        
             var sizeBytes = localServiceBuffer.LengthLength;
             Task createCheckpointTask = null;
             // Process the Async message
@@ -4171,7 +4181,7 @@ namespace Ambrosia
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
-            _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(_serviceLogPath, new AmbrosiaTrace(serviceCheckpointPath), serviceProjectPath, new CSharpProjectUtil());
+            _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
