@@ -19,6 +19,8 @@ namespace Ambrosia
         public static string ICReceivePipeName;
         public static string ICSendPipeName;
         public static string ICLogLocation = null;
+        public static string ICCheckpointLocation = null;
+        public static string ICProjectLocation = null;
     }
 
     // Constants for leading byte communicated between services;

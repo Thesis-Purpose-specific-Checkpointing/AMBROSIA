@@ -18,22 +18,12 @@ using CRA.ClientLibrary;
 using System.Diagnostics;
 using System.Xml.Serialization;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using DebuggingSupport;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Ambrosia
 {
-    internal struct LongPair
-    {
-        public LongPair(long first,
-                        long second)
-        {
-            First = first;
-            Second = second;
-        }
-        internal long First { get; set; }
-        internal long Second { get; set; }
-    }
-
     internal static class DictionaryTools
     {
         internal static void AmbrosiaSerialize(this ConcurrentDictionary<string, long> dict, ILogWriter writeToStream)
@@ -2039,6 +2029,9 @@ namespace Ambrosia
 
         ConcurrentDictionary<string, InputConnectionRecord> _inputs;
         ConcurrentDictionary<string, OutputConnectionRecord> _outputs;
+
+        internal CheckpointingStrategy<AmbrosiaLogEntry> _checkpointingStrategy;
+        
         internal int _localServiceReceiveFromPort;           // specifiable on the command line
         internal int _localServiceSendToPort;                // specifiable on the command line 
         internal string _serviceName;  // specifiable on the command line
@@ -3180,6 +3173,16 @@ namespace Ambrosia
 
         private void ProcessSyncLocalMessage(ref FlexReadBuffer localServiceBuffer, FlexReadBuffer batchServiceBuffer)
         {
+            bool shouldTakeCheckpoint = false;
+            if (_checkpointingStrategy is StaticCheckpointingStrategy<AmbrosiaLogEntry>)
+            {
+                shouldTakeCheckpoint = ((StaticCheckpointingStrategy<AmbrosiaLogEntry>) _checkpointingStrategy).ShouldTakeCheckpoint(1).Result;
+            } else if (_checkpointingStrategy.GetType().IsInstanceOfType(typeof(StaticCheckpointingStrategy<AmbrosiaLogEntry>)))
+            {
+                // TODO: Implement DynamicCheckpointingStrategy and call it here (also alter the if-condition).
+                shouldTakeCheckpoint = false;
+            }
+        
             var sizeBytes = localServiceBuffer.LengthLength;
             Task createCheckpointTask = null;
             // Process the Async message
@@ -4150,7 +4153,9 @@ namespace Ambrosia
                                     int version,
                                     bool testUpgrade,
                                     int serviceReceiveFromPort = 0,
-                                    int serviceSendToPort = 0)
+                                    int serviceSendToPort = 0,
+                                    string serviceCheckpointPath = "",
+                                    string serviceProjectPath = "")
         {
             _localServiceReceiveFromPort = serviceReceiveFromPort;
             _localServiceSendToPort = serviceSendToPort;
@@ -4162,6 +4167,15 @@ namespace Ambrosia
             _serviceName = serviceName;
             _sharded = false;
             _createService = false;
+            
+#if DEBUG
+            Console.WriteLine("Initialize checkpointing strategy");
+#endif
+            _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(_serviceLogPath, new AmbrosiaTrace(serviceCheckpointPath), serviceProjectPath, new CSharpProjectUtil());
+#if DEBUG
+            Console.WriteLine("Checkpointing strategy initialized");
+#endif
+            
             InitializeLogWriterStatics();
             RecoverOrStartAsync(checkpointToLoad, testUpgrade).Wait();
         }

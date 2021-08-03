@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0</TargetFrameworks>
+    <TargetFrameworks>net472;netstandard2.0</TargetFrameworks>
     <TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>
     <SignAssembly>true</SignAssembly>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -13,8 +13,17 @@
     <DefineConstants>$(DefineConstants);NETSTANDARD</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Packages for Code-Tasks (Analyze the code) -->
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.2.2" />
+    <PackageReference Include="Microsoft.CodeAnalysis" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Scripting" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="3.9.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="3.9.0-2.final" />
+    
     <PackageReference Include="Azure.Storage.Blobs" Version="12.4.4" />
-    <PackageReference Include="Microsoft.CodeAnalysis.Scripting" Version="2.7.0" />
     <PackageReference Include="Microsoft.VisualStudio.Threading">
       <Version>15.8.168</Version>
     </PackageReference>
@@ -38,5 +47,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\SharedAmbrosiaTools\SharedAmbrosiaTools.csproj" />
+    <ProjectReference Include="..\..\..\DebuggingSupport\DebuggingSupportCheckpointer\DebuggingSupportCheckpointer.csproj" />
+    <ProjectReference Include="..\..\..\DebuggingSupport\AmbrosiaDebuggingSupportCheckpointing\AmbrosiaDebuggingSupportCheckpointing.csproj" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <Reference Include="Microsoft.CodeAnalysis, Version=3.9.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35">
+      <HintPath>bin\x64\Debug\net472\Microsoft.CodeAnalysis.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>
