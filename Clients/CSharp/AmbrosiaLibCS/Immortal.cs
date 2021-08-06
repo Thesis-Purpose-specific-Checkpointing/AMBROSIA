@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -8,11 +9,14 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using System.Xml;
+using DebuggingSupport;
+using Newtonsoft.Json;
 using Remote.Linq.Expressions;
 using static Ambrosia.StreamCommunicator;
 
@@ -650,6 +654,18 @@ namespace Ambrosia
                                 break;
                             }
 
+                        case AmbrosiaRuntimeLBConstants.takeSubCheckpointByte:
+                        {
+#if DEBUG
+                            Console.WriteLine("*X* Received a take subcheckpoint message");
+#endif
+                            _cursor++;
+
+                            await this.TakeStateCheckpointAsnyc();
+
+                            break;
+                        }
+
                         default:
                             {
                                 var s = String.Format("Illegal leading byte in message: {0}", firstByte);
@@ -801,6 +817,38 @@ namespace Ambrosia
             using (var passThruStream = new PassThruWriteStream(_ambrosiaSendToStream))
             {
                 _immortalSerializer.Serialize(this, passThruStream);
+            }
+            _ambrosiaSendToStream.Flush();
+#if DEBUG
+            Console.WriteLine("*X* Sent checkpoint back to LAR");
+#endif
+            _ambrosiaSendToConnectionRecord.BufferedOutput.UnlockOutputBuffer();
+            _outputLock.Release();
+        }
+
+        private async Task TakeStateCheckpointAsnyc()
+        {
+            // wait for quiesence
+            _outputLock.Acquire(2);
+            _ambrosiaSendToConnectionRecord.BufferedOutput.LockOutputBuffer();
+
+            // Save current task state
+            await this.SaveTaskAsync();
+
+            // Second, serialize state and send checkpoint
+            var _state = _immortalSerializer.SerializeState(this);
+                
+            var checkpointSize = _state.Length;
+            var sizeOfMessage = 1 + LongSize(checkpointSize);
+            _ambrosiaSendToStream.WriteInt(sizeOfMessage);
+            _ambrosiaSendToStream.WriteByte(AmbrosiaRuntimeLBConstants.subCheckpointByte);
+            _ambrosiaSendToStream.WriteLong(checkpointSize);
+            
+            using (var passThruStream = new PassThruWriteStream(_ambrosiaSendToStream))
+            {
+                using (var writer = new StreamWriter(passThruStream)) {
+                    writer.Write(_state);
+                }
             }
             _ambrosiaSendToStream.Flush();
 #if DEBUG
@@ -1607,6 +1655,33 @@ namespace Ambrosia
         public abstract long SerializeSize(Immortal c);
         public abstract void Serialize(Immortal c, Stream writeToStream);
         public abstract Immortal Deserialize(Type runtimeType, Stream dataStream);
+
+        /// <summary>
+        /// Serializes only the state of the immortal into a State object (of DebuggingSupport).
+        /// </summary>
+        /// <param name="c">The immortal whose state should be serialized</param>
+        /// <param name="writeToStream">The stream to write the serialized state into</param>
+        public String SerializeState(Immortal c)
+        {
+            var immortalType = c.GetType();
+            
+            // Create and fill state object
+            var state = new State();
+            foreach (var fieldInfo in immortalType
+                .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+                .Where(field => Attribute.IsDefined(field, typeof(DataMemberAttribute))))
+            {
+                state.KeyValuePairs.Add(fieldInfo.Name, fieldInfo.GetValue(c));
+            }
+            
+            return JsonConvert.SerializeObject(state);
+
+            // Serialize and send data
+            //using (var writer = XmlDictionaryWriter.CreateBinaryWriter(writeToStream))
+            //{
+            //serializer.WriteObject(writeToStream, state);
+            //}
+        }
     }
 
     [DataContract]

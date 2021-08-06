@@ -42,6 +42,8 @@ namespace Ambrosia
         public const byte CountReplayableRPCBatchByte = 13;
         public const byte trimToByte = 14;
         public const byte becomingPrimaryByte = 15;
+        public const byte takeSubCheckpointByte = 16;
+        public const byte subCheckpointByte = 17;
     }
 
     public static class RpcTypes

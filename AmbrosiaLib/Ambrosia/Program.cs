@@ -21,6 +21,7 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using DebuggingSupport;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Newtonsoft.Json;
 
 namespace Ambrosia
 {
@@ -1840,7 +1841,7 @@ namespace Ambrosia
                 _workStream.Flush();
             }
 
-            internal void QuiesceServiceWithSendCheckpointRequest(bool upgrading = false, bool becomingPrimary = false)
+            internal void QuiesceServiceWithSendCheckpointRequest(bool upgrading = false, bool becomingPrimary = false, bool subCheckpoint = false)
             {
                 _workStream.WriteIntFixed(_committerID);
                 var numMessageBytes = StreamCommunicator.IntSize(1) + 1;
@@ -1859,6 +1860,10 @@ namespace Ambrosia
                 {
                     memStream.WriteByte(takeBecomingPrimaryCheckpointByte);
                 }
+                else if (subCheckpoint)
+                {
+                    memStream.WriteByte(takeSubCheckpointByte);
+                } 
                 else
                 {
                     memStream.WriteByte(takeCheckpointByte);
@@ -2070,6 +2075,8 @@ namespace Ambrosia
         public const byte CountReplayableRPCBatchByte = AmbrosiaRuntimeLBConstants.CountReplayableRPCBatchByte;
         public const byte trimToByte = AmbrosiaRuntimeLBConstants.trimToByte;
         public const byte becomingPrimaryByte = AmbrosiaRuntimeLBConstants.becomingPrimaryByte;
+        public const byte takeSubCheckpointByte = AmbrosiaRuntimeLBConstants.takeSubCheckpointByte;
+        public const byte subCheckpointByte = AmbrosiaRuntimeLBConstants.subCheckpointByte;
 
         CRAClientLibrary _coral;
 
@@ -2088,6 +2095,7 @@ namespace Ambrosia
         // Azure table for service instance metadata information
         CloudTable _serviceInstanceTable;
         long _lastCommittedCheckpoint;
+        private long _lastCommittedSubCheckpoint;
 
         // Azure blob for writing commit log and checkpoint
         ILogWriter _checkpointWriter;
@@ -2494,6 +2502,11 @@ namespace Ambrosia
             return Path.Combine(LogDirectory(version, shardID), "server");
         }
 
+        private string SubCheckpointName(long checkpoint, long subCheckpoint, long shardID = -1, long version = -1)
+        {
+            return LogFileNameBase(version, shardID) + $"subchkpt{checkpoint.ToString()}.{subCheckpoint.ToString()}";
+        }
+        
         private string CheckpointName(long checkpoint, long shardID = -1, long version = -1)
         {
             return LogFileNameBase(version, shardID) + "chkpt" + checkpoint.ToString();
@@ -3033,6 +3046,7 @@ namespace Ambrosia
                 
                 // Inserted code for checkpointing strategies
                 var shouldTakeCheckpoint = false;
+                State _state;
                 switch (_checkpointingStrategy)
                 {
                     case null:
@@ -3042,14 +3056,25 @@ namespace Ambrosia
                         shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID).Result;
                         break;
                     case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
-                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, null, null).Result;
+                        // How To:
+                        // 1. TakeSubCheckpointAsync
+                        // 2. Create State with checkpoint-stream
+                        // 3. Run strategy
+                        // 4. Remove or keep the corresponding checkpoint
+                        _state = await GetComponentStateAsync();
+                        Console.WriteLine($"State: {_state.KeyValuePairs}");
+                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null).Result;
                         break;
                     default:
                         shouldTakeCheckpoint = false;
                         break;
                 }
-                
-                
+
+                if (shouldTakeCheckpoint)
+                {
+                    await TakeSubCheckpointAsync();
+                }
+
                 // Do the actual work on the local service
                 _localServiceSendToStream.Write(headerBuf, 0, Committer.HeaderSize);
                 _localServiceSendToStream.Write(tempBuf, 0, commitSize);
@@ -3199,7 +3224,8 @@ namespace Ambrosia
 #if DEBUG
             ValidateMessageValidity(localServiceBuffer.Buffer[sizeBytes]);
 #endif
-            switch (localServiceBuffer.Buffer[sizeBytes])
+            var messageType = localServiceBuffer.Buffer[sizeBytes];
+            switch (messageType)
             {
                 case takeCheckpointByte:
                     // Handle take checkpoint messages - This is here for testing
@@ -3209,8 +3235,10 @@ namespace Ambrosia
                     break;
 
                 case checkpointByte:
+                case subCheckpointByte:
                     _lastReceivedCheckpointSize = StreamCommunicator.ReadBufferedLong(localServiceBuffer.Buffer, sizeBytes + 1);
-                    Trace.TraceInformation("Reading a checkpoint {0} bytes", _lastReceivedCheckpointSize);
+                    var subPrefix = messageType == subCheckpointByte ? "sub" : "";
+                    Trace.TraceInformation($"Reading a {subPrefix}checkpoint {_lastReceivedCheckpointSize} bytes");
                     LastReceivedCheckpoint = localServiceBuffer;
                     // Block this thread until checkpointing is complete
                     while (LastReceivedCheckpoint != null) { Thread.Yield(); };
@@ -3889,6 +3917,24 @@ namespace Ambrosia
             }
         }
 
+        private ILogWriter OpenNextSubCheckpointFile()
+        {
+            if (_logWriterStatics.FileExists(SubCheckpointName(_lastCommittedCheckpoint, _lastCommittedSubCheckpoint + 1)))
+            {
+                _logWriterStatics.DeleteFile(SubCheckpointName(_lastCommittedCheckpoint, _lastCommittedSubCheckpoint + 1));
+            }
+            ILogWriter retVal = null;
+            try
+            {
+                retVal = _logWriterStatics.Generate(SubCheckpointName(_lastCommittedCheckpoint, _lastCommittedSubCheckpoint + 1), 1024 * 1024, 6);
+            }
+            catch (Exception e)
+            {
+                OnError(0, "Error opening next subcheckpoint file" + e.ToString());
+            }
+            return retVal;
+        }
+        
         private ILogWriter OpenNextCheckpointFile()
         {
             if (_logWriterStatics.FileExists(CheckpointName(_lastCommittedCheckpoint + 1)))
@@ -3916,6 +3962,118 @@ namespace Ambrosia
             }
         }
 
+        public async Task<Stream> RequestComponentStateAsync()
+        {
+            _committer.QuiesceServiceWithSendCheckpointRequest(subCheckpoint: true);
+
+            var stream = new MemoryStream();
+            CheckpointingService = true;
+            while (LastReceivedCheckpoint == null) { await Task.Yield(); }
+            // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
+            var bytes = (int) _lastReceivedCheckpointSize;
+            byte[] buffer = new byte[bytes];
+            int read;
+            while (bytes > 0 && 
+                   (read = _localServiceReceiveFromStream.Read(buffer, 0, (int) Math.Min((long) buffer.Length, bytes))) > 0)
+            {
+                stream.Write(buffer, 0, read);
+                bytes -= read;
+            }
+            stream.Flush();
+            stream.Position = 0;
+            return stream;
+        }
+
+        private async Task<State> GetComponentStateAsync()
+        {
+            string _state = null;
+            using (var stream = await RequestComponentStateAsync())
+            {
+                using (var reader = new StreamReader(stream))
+                {
+                    _state = reader.ReadToEnd();
+                }
+            }
+
+            if (_state == null || _state.Equals(""))
+            {
+                return null;
+            }
+
+            return JsonConvert.DeserializeObject<State>(_state);
+        }
+
+        public async Task TakeSubCheckpointAsync()
+        {
+            _committer.QuiesceServiceWithSendCheckpointRequest();
+            
+            // await CheckpointAsync();
+            //_checkpointWriter.Write(_localServiceReceiveFromStream, _lastReceivedCheckpointSize);
+            var oldCheckpointWriter = _checkpointWriter;
+            // Take lock on new sub checkpoint file
+            _checkpointWriter = OpenNextSubCheckpointFile();// Make sure the service is quiesced before continuing
+            CheckpointingService = true;
+            while (LastReceivedCheckpoint == null) { await Task.Yield(); }
+            // Now that the service has sent us its checkpoint, we need to quiesce the output connections, which may be sending
+            foreach (var outputRecord in _outputs)
+            {
+                outputRecord.Value.BufferedOutput.AcquireAppendLock();
+            }
+
+            CheckpointingService = false;
+            // Serialize committer
+            _committer.Serialize(_checkpointWriter);
+            // Serialize input connections
+            _inputs.AmbrosiaSerialize(_checkpointWriter);
+            // Serialize output connections
+            _outputs.AmbrosiaSerialize(_checkpointWriter);
+            foreach (var outputRecord in _outputs)
+            {
+                outputRecord.Value.BufferedOutput.ReleaseAppendLock();
+            }
+
+            // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
+            _checkpointWriter.Write(LastReceivedCheckpoint.Buffer, 0, LastReceivedCheckpoint.Length);
+            _checkpointWriter.Write(_localServiceReceiveFromStream, _lastReceivedCheckpointSize);
+            _checkpointWriter.Flush();
+            _lastCommittedSubCheckpoint++;
+
+            // Trim output buffers of inputs, since the inputs are now part of the checkpoint and can't be lost. Must do this after the checkpoint has been
+            // successfully written
+            foreach (var kv in _inputs)
+            {
+                OutputConnectionRecord outputConnectionRecord;
+                if (!_outputs.TryGetValue(kv.Key, out outputConnectionRecord))
+                {
+                    outputConnectionRecord = new OutputConnectionRecord(this);
+                    _outputs[kv.Key] = outputConnectionRecord;
+                }
+                // Must lock to atomically update due to race with ToControlStreamAsync
+                lock (outputConnectionRecord._remoteTrimLock)
+                {
+                    outputConnectionRecord.RemoteTrim = Math.Max(kv.Value.LastProcessedID, outputConnectionRecord.RemoteTrim);
+                    outputConnectionRecord.RemoteTrimReplayable = Math.Max(kv.Value.LastProcessedReplayableID, outputConnectionRecord.RemoteTrimReplayable);
+                }
+                if (outputConnectionRecord.ControlWorkQ.IsEmpty)
+                {
+                    outputConnectionRecord.ControlWorkQ.Enqueue(-2);
+                }
+            }
+
+            if (oldCheckpointWriter != null)
+            {
+                // Release lock on previous checkpoint file
+                oldCheckpointWriter.Dispose();
+            }
+
+            // Unblock the local input processing task
+            LastReceivedCheckpoint.ThrowAwayBuffer();
+            LastReceivedCheckpoint = null;
+            
+            _checkpointWriter.Dispose();
+            _checkpointWriter = null;
+        }
+        
         // This method takes a checkpoint and bumps the counter. It DOES NOT quiesce anything
         public async Task CheckpointAsync()
         {
@@ -3948,6 +4106,7 @@ namespace Ambrosia
             _checkpointWriter.Write(_localServiceReceiveFromStream, _lastReceivedCheckpointSize);
             _checkpointWriter.Flush();
             _lastCommittedCheckpoint++;
+            _lastCommittedSubCheckpoint = 0;
             InsertOrReplaceServiceInfoRecord(InfoTitle("LastCommittedCheckpoint"), _lastCommittedCheckpoint.ToString());
 
             // Trim output buffers of inputs, since the inputs are now part of the checkpoint and can't be lost. Must do this after the checkpoint has been
@@ -4181,7 +4340,8 @@ namespace Ambrosia
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
-            _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
+            // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
+            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
