@@ -34,6 +34,8 @@ namespace Ambrosia
         private static int _serviceReceiveFromPort = -1;
         private static int _serviceSendToPort = -1;
         private static string _serviceLogPath = Path.Combine(Path.GetPathRoot(Path.GetFullPath(".")), "AmbrosiaLogs") + Path.DirectorySeparatorChar;
+        private static string _serviceCheckpointPath;
+        private static string _serviceProjectPath;
         private static string _binariesLocation = "AmbrosiaBinaries";
         private static long _checkpointToLoad = 1;
         private static bool _isTestingUpgrade = false;
@@ -85,6 +87,8 @@ namespace Ambrosia
                     param.serviceSendToPort = _serviceSendToPort;
                     param.serviceName = _instanceName;
                     param.serviceLogPath = _serviceLogPath;
+                    param.serviceCheckpointPath = _serviceCheckpointPath;
+                    param.serviceProjectPath = _serviceProjectPath;
                     param.AmbrosiaBinariesLocation = _binariesLocation;
                     param.storageConnectionString = Environment.GetEnvironmentVariable("AZURE_STORAGE_CONN_STRING");
 
@@ -160,6 +164,8 @@ namespace Ambrosia
                 {"aa|activeActive", "Is active-active enabled.", aa => _isActiveActive = true},
                 {"cv|currentVersion=", "The current version #.", cv => _currentVersion = int.Parse(cv)},
                 {"uv|upgradeVersion=", "The upgrade version #.", uv => _upgradeVersion = int.Parse(uv)},
+                { "cpp|checkpointPath=", "The service checkpoint path override.", cpp => _serviceCheckpointPath = cpp },
+                { "pp|projectPath=", "The service project path override.", pp => _serviceProjectPath = pp },
             });
 
             var addReplicaOptionSet = new OptionSet {
