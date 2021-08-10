@@ -1028,6 +1028,8 @@ namespace Ambrosia
         public string serviceName;
         public string AmbrosiaBinariesLocation;
         public string serviceLogPath;
+        public string serviceCheckpointPath;
+        public string serviceProjectPath;
         public bool? createService;
         public bool pauseAtStart;
         public bool persistLogs;
@@ -3062,8 +3064,7 @@ namespace Ambrosia
                         // 3. Run strategy
                         // 4. Remove or keep the corresponding checkpoint
                         _state = await GetComponentStateAsync();
-                        Console.WriteLine($"State: {_state.KeyValuePairs}");
-                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null).Result;
+                        shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
                         break;
                     default:
                         shouldTakeCheckpoint = false;
@@ -3971,16 +3972,21 @@ namespace Ambrosia
             while (LastReceivedCheckpoint == null) { await Task.Yield(); }
             // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
             var bytes = (int) _lastReceivedCheckpointSize;
-            byte[] buffer = new byte[bytes];
-            int read;
-            while (bytes > 0 && 
-                   (read = _localServiceReceiveFromStream.Read(buffer, 0, (int) Math.Min((long) buffer.Length, bytes))) > 0)
-            {
-                stream.Write(buffer, 0, read);
-                bytes -= read;
-            }
+
+            int numBytesRead = 0;
+            var buffer = new byte[Math.Min(bytes, 1024)];
+            do {
+                var readBytes = _localServiceReceiveFromStream.Read(buffer, 0, buffer.Length);
+                stream.Write(buffer, numBytesRead, buffer.Length);
+                numBytesRead += readBytes;
+            } while(numBytesRead < bytes);
             stream.Flush();
             stream.Position = 0;
+            
+            // Cleanup
+            LastReceivedCheckpoint.ThrowAwayBuffer();
+            LastReceivedCheckpoint = null;
+            
             return stream;
         }
 
@@ -4178,7 +4184,9 @@ namespace Ambrosia
                 p.storageConnectionString,
                 p.currentVersion,
                 p.upgradeToVersion,
-                sharded
+                sharded,
+                p.serviceCheckpointPath,
+                p.serviceProjectPath
             );
             return;
         }
@@ -4236,7 +4244,9 @@ namespace Ambrosia
                        string storageConnectionString,
                        long currentVersion,
                        long upgradeToVersion,
-                       bool sharded
+                       bool sharded,
+                       string serviceCheckpointPath = "",
+                       string serviceProjectPath = ""
                        )
         {
             if (LogReaderStaticPicker.curStatic == null || LogWriterStaticPicker.curStatic == null)
@@ -4313,6 +4323,9 @@ namespace Ambrosia
             AddAsyncOutputEndpoint(AmbrosiaDataOutputsName, new AmbrosiaOutput(this, "data"));
             AddAsyncOutputEndpoint(AmbrosiaControlOutputsName, new AmbrosiaOutput(this, "control"));
             _createService = createService.Value;
+            
+            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath);
+            
             RecoverOrStartAsync().Wait();
         }
 
@@ -4337,6 +4350,13 @@ namespace Ambrosia
             _sharded = false;
             _createService = false;
             
+            InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath);
+            
+            InitializeLogWriterStatics();
+            RecoverOrStartAsync(checkpointToLoad, testUpgrade).Wait();
+        }
+        
+        private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath) {
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
@@ -4345,9 +4365,6 @@ namespace Ambrosia
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
-            
-            InitializeLogWriterStatics();
-            RecoverOrStartAsync(checkpointToLoad, testUpgrade).Wait();
         }
     }
 }
