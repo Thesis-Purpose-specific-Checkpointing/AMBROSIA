@@ -4341,7 +4341,7 @@ namespace Ambrosia
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
             // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
-            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
+            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil());
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
