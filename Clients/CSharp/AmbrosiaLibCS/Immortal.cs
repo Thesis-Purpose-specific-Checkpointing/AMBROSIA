@@ -838,7 +838,7 @@ namespace Ambrosia
             // Second, serialize state and send checkpoint
             var _state = _immortalSerializer.SerializeState(this);
                 
-            var checkpointSize = _state.Length;
+            var checkpointSize = Encoding.UTF8.GetByteCount(_state);
             var sizeOfMessage = 1 + LongSize(checkpointSize);
             _ambrosiaSendToStream.WriteInt(sizeOfMessage);
             _ambrosiaSendToStream.WriteByte(AmbrosiaRuntimeLBConstants.subCheckpointByte);
