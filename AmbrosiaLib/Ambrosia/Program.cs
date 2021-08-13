@@ -3046,39 +3046,56 @@ namespace Ambrosia
                     }
                 }
                 
-                // Inserted code for checkpointing strategies
-                var shouldTakeCheckpoint = false;
-                State _state;
-                switch (_checkpointingStrategy)
-                {
-                    case null:
-                        shouldTakeCheckpoint = false;
-                        break;
-                    case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
-                        shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID).Result;
-                        break;
-                    case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
-                        // How To:
-                        // 1. TakeSubCheckpointAsync
-                        // 2. Create State with checkpoint-stream
-                        // 3. Run strategy
-                        // 4. Remove or keep the corresponding checkpoint
-                        _state = await GetComponentStateAsync();
-                        shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
-                        break;
-                    default:
-                        shouldTakeCheckpoint = false;
-                        break;
-                }
+                // Split log record
+                // If multiple messages are included in this log record -> send them separately
+                var combinedMessage = new AmbrosiaMessage();
+                combinedMessage.Length = commitSize;
+                combinedMessage.Content = tempBuf;
+                var combinedHeader = new AmbrosiaHeader(headerBuf);
 
-                if (shouldTakeCheckpoint)
+                await foreach (var message in LogEntryHelper.SplitLogEntryMessage(combinedMessage))
                 {
-                    await TakeSubCheckpointAsync();
-                }
+                    // Generate Header for message
+                    var header = new AmbrosiaHeader();
+                    header.CommitterId = combinedHeader.CommitterId;
+                    header.LogRecordSequenceId = combinedHeader.LogRecordSequenceId;
+                    header.LogSize = Committer.HeaderSize + message.Length;
+                    header.CheckBytes = state.Committer.CheckBytes(message.Content, 0, message.Length);
 
-                // Do the actual work on the local service
-                _localServiceSendToStream.Write(headerBuf, 0, Committer.HeaderSize);
-                _localServiceSendToStream.Write(tempBuf, 0, commitSize);
+                    // Inserted code for checkpointing strategies
+                    var shouldTakeCheckpoint = false;
+                    State _state;
+                    switch (_checkpointingStrategy)
+                    {
+                        case null:
+                            shouldTakeCheckpoint = false;
+                            break;
+                        case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                            shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID).Result;
+                            break;
+                        case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                            // How To:
+                            // 1. TakeSubCheckpointAsync
+                            // 2. Create State with checkpoint-stream
+                            // 3. Run strategy
+                            // 4. Remove or keep the corresponding checkpoint
+                            _state = await GetComponentStateAsync();
+                            shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
+                            break;
+                        default:
+                            shouldTakeCheckpoint = false;
+                            break;
+                    }
+
+                    if (shouldTakeCheckpoint)
+                    {
+                        await TakeSubCheckpointAsync();
+                    }
+
+                    // Do the actual work on the local service
+                    _localServiceSendToStream.Write(AmbrosiaLogUtil.GetHeaderBytes(header), 0, Committer.HeaderSize);
+                    _localServiceSendToStream.Write(message.Content, 0, message.Length);
+                }
                 // Trim the outputs. Should clean as aggressively as during normal operation
                 foreach (var kv in trimDict)
                 {
@@ -4371,7 +4388,7 @@ namespace Ambrosia
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
             // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
-            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil());
+            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), false);
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
