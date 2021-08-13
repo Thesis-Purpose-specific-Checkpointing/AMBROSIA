@@ -379,6 +379,28 @@ namespace Ambrosia
                 checkpointSize -= bytesRead;
             }
         }
+        
+        public static void Write(this Stream writerStream,
+            Stream readStream,
+            long checkpointSize)
+        {
+            var blockSize = 1024 * 1024;
+            var buffer = new byte[blockSize];
+            while (checkpointSize > 0)
+            {
+                int bytesRead;
+                if (checkpointSize >= blockSize)
+                {
+                    bytesRead = readStream.Read(buffer, 0, blockSize);
+                }
+                else
+                {
+                    bytesRead = readStream.Read(buffer, 0, (int)checkpointSize);
+                }
+                writerStream.Write(buffer, 0, bytesRead);
+                checkpointSize -= bytesRead;
+            }
+        }
 
         public static void Write(this ILogWriter writer,
                            Stream readStream,

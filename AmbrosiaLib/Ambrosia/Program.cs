@@ -3963,50 +3963,60 @@ namespace Ambrosia
             }
         }
 
-        public async Task<Stream> RequestComponentStateAsync()
+        public async Task<String> RequestComponentStateAsync()
         {
             _committer.QuiesceServiceWithSendCheckpointRequest(subCheckpoint: true);
 
-            var stream = new MemoryStream();
             CheckpointingService = true;
             while (LastReceivedCheckpoint == null) { await Task.Yield(); }
             // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
             var bytes = (int) _lastReceivedCheckpointSize;
 
-            int numBytesRead = 0;
-            var buffer = new byte[Math.Min(bytes, 1024)];
-            do {
-                var readBytes = _localServiceReceiveFromStream.Read(buffer, 0, buffer.Length);
-                stream.Write(buffer, numBytesRead, buffer.Length);
-                numBytesRead += readBytes;
-            } while(numBytesRead < bytes);
-            stream.Flush();
-            stream.Position = 0;
+            var _state = "";
             
-            // Cleanup
-            LastReceivedCheckpoint.ThrowAwayBuffer();
-            LastReceivedCheckpoint = null;
-            
-            return stream;
-        }
-
-        private async Task<State> GetComponentStateAsync()
-        {
-            string _state = null;
-            using (var stream = await RequestComponentStateAsync())
+            using (var stream = new MemoryStream())
             {
+                stream.Write(_localServiceReceiveFromStream, bytes);
+
                 using (var reader = new StreamReader(stream))
                 {
                     _state = reader.ReadToEnd();
                 }
             }
 
+            // Cleanup
+            LastReceivedCheckpoint.ThrowAwayBuffer();
+            LastReceivedCheckpoint = null;
+            
+            return _state;
+        }
+
+        private async Task<State> GetComponentStateAsync()
+        {
+            string _state = await RequestComponentStateAsync();
+
             if (_state == null || _state.Equals(""))
             {
                 return null;
             }
 
-            return JsonConvert.DeserializeObject<State>(_state);
+            try
+            {
+                return JsonConvert.DeserializeObject<State>(_state);
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError($"Error deserializing state of LB: {e.Message}");
+                try
+                {
+                    return await GetComponentStateAsync();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceError($"Couldn't request state of LB second time: {ex.Message}");
+                    return null;
+                }
+            }
         }
 
         public async Task TakeSubCheckpointAsync()
