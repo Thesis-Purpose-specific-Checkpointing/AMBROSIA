@@ -2388,17 +2388,27 @@ namespace Ambrosia
                 // Recover output connections
                 state.Outputs = state.Outputs.AmbrosiaDeserialize(checkpointStream, this);
                 UnbufferNonreplayableCalls(state.Outputs);
-                // Deserialize other helpful information about the current processing within the log file
-                if (state.LastCommittedSubCheckpoint > 0)
-                {
-                    state.LastProcessedMessage = checkpointStream.ReadLongFixed();
-                    state.LastLogFileOffset = checkpointStream.ReadLongFixed();
-                }
 
                 // Restore new service from checkpoint
                 var serviceCheckpoint = new FlexReadBuffer();
                 FlexReadBuffer.Deserialize(checkpointStream, serviceCheckpoint);
                 state.Committer.SendCheckpointToRecoverFrom(serviceCheckpoint.Buffer, serviceCheckpoint.Length, checkpointStream);
+                // Deserialize other helpful information about the current processing within the log file
+                if (state.LastCommittedSubCheckpoint > 0)
+                {
+                    try
+                    {
+                        state.LastProcessedMessage = checkpointStream.ReadLongFixed();
+                        state.LastLogFileOffset = checkpointStream.ReadLongFixed();
+                    }
+                    catch (Exception e)
+                    {
+                        // It is expected that this method may fail if a checkpoint was created prior to the additional information added
+                        // -> To prevent breaking older checkpoints: just ignore issues with reading these information
+                        state.LastProcessedMessage = 0;
+                        state.LastLogFileOffset = 0;
+                    }
+                }
             }
 
             using (ILogReader replayStream = LogReaderStaticPicker.curStatic.Generate(LogFileName(state.LastLogFile, state.ShardID)))
@@ -4149,9 +4159,6 @@ namespace Ambrosia
             _inputs.AmbrosiaSerialize(_checkpointWriter);
             // Serialize output connections
             _outputs.AmbrosiaSerialize(_checkpointWriter);
-            // Serialize other helpful information about the current processing within the log file
-            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
-            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
             // We do not need to write the "_lastCommittedSubCheckpoint" information, as this information should always be given from outside (the developer/ttd specifies the last sub-checkpoint to load)
             foreach (var outputRecord in _outputs)
             {
@@ -4161,6 +4168,11 @@ namespace Ambrosia
             // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
             _checkpointWriter.Write(LastReceivedCheckpoint.Buffer, 0, LastReceivedCheckpoint.Length);
             _checkpointWriter.Write(_localServiceReceiveFromStream, _lastReceivedCheckpointSize);
+            // Serialize other helpful information about the current processing within the log file
+            // To prevent breaking previous checkpoints -> Include new information at the end of the checkpoint.
+            // That way the information can be skipped if it is not included in a checkpoint!
+            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
+            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
             _checkpointWriter.Flush();
             _lastCommittedSubCheckpoint++;
 
@@ -4222,10 +4234,6 @@ namespace Ambrosia
             _inputs.AmbrosiaSerialize(_checkpointWriter);
             // Serialize output connections
             _outputs.AmbrosiaSerialize(_checkpointWriter);
-            // Serialize other helpful information about the current processing within the log file
-            /* TODO: To prevent breaking older checkpoints -> Do not de-/serialize last mid-processing information (of splitted log-processing). This should be enabled in the future tho.
-            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
-            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);*/
             foreach (var outputRecord in _outputs)
             {
                 outputRecord.Value.BufferedOutput.ReleaseAppendLock();
@@ -4234,6 +4242,11 @@ namespace Ambrosia
             // Serialize the service note that the local listener task is blocked after reading the checkpoint until the end of this method
             _checkpointWriter.Write(LastReceivedCheckpoint.Buffer, 0, LastReceivedCheckpoint.Length);
             _checkpointWriter.Write(_localServiceReceiveFromStream, _lastReceivedCheckpointSize);
+            // Serialize other helpful information about the current processing within the log file
+            // To prevent breaking previous checkpoints -> Include new information at the end of the checkpoint.
+            // That way the information can be skipped if it is not included in a checkpoint!
+            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
+            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
             _checkpointWriter.Flush();
             _lastCommittedCheckpoint++;
             _lastCommittedSubCheckpoint = 0;
