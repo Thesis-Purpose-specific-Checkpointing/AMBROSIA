@@ -852,7 +852,7 @@ namespace Ambrosia
             }
             _ambrosiaSendToStream.Flush();
 #if DEBUG
-            Console.WriteLine("*X* Sent checkpoint back to LAR");
+            Console.WriteLine("*X* Sent subcheckpoint back to LAR");
 #endif
             _ambrosiaSendToConnectionRecord.BufferedOutput.UnlockOutputBuffer();
             _outputLock.Release();

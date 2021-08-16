@@ -4093,7 +4093,8 @@ namespace Ambrosia
             using (var stream = new MemoryStream())
             {
                 stream.Write(_localServiceReceiveFromStream, bytes);
-
+                stream.Position = 0;
+                
                 using (var reader = new StreamReader(stream))
                 {
                     _state = reader.ReadToEnd();
