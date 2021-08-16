@@ -30,6 +30,7 @@ namespace SupportingImmortalCoordinator
         
         // Time Travel Debugging params
         private static long _checkpointToLoad;
+        private static long _subCheckpointToLoad = -1;
         private static int _currentVersion;
         private static bool _isTestingUpgrade;
         
@@ -44,7 +45,7 @@ namespace SupportingImmortalCoordinator
                 ParseAndValidateOptions(args.Skip(1).ToArray());
                 var myRuntime = new AmbrosiaRuntime();
                 myRuntime.InitializeRepro(_instanceName, StartupParamOverrides.ICLogLocation, _checkpointToLoad, _currentVersion,
-                    _isTestingUpgrade, StartupParamOverrides.receivePort, StartupParamOverrides.sendPort,
+                    _isTestingUpgrade, _subCheckpointToLoad, StartupParamOverrides.receivePort, StartupParamOverrides.sendPort,
                     StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation);
                 return;
             }
@@ -175,6 +176,7 @@ namespace SupportingImmortalCoordinator
                
                 // Time Travel Debugging params
                 { "c|checkpoint=", "The checkpoint # to load.", c => _checkpointToLoad = long.Parse(c) },
+                { "sc|subcheckpoint=", "The sub-checkpoint # to load.", sc => _subCheckpointToLoad = long.Parse(sc) },
                 { "cv|currentVersion=", "The version # to debug.", cv => _currentVersion = int.Parse(cv) },
                 { "tu|testingUpgrade", "Is testing upgrade.", u => _isTestingUpgrade = true },
                 { "cpp|checkpointPath=", "The service checkpoint path override.", cpp => StartupParamOverrides.ICCheckpointLocation = cpp },

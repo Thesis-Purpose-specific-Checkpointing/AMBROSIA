@@ -15,17 +15,17 @@ namespace Ambrosia
         /// and splits this message into separate messages.
         /// Each new message represents a single event.
         /// </summary>
-        /// <param name="logEntryMessage">The message to split</param>
+        /// <param name="logEntryMessage">The message to split (as this represents the log record content it might include multiple actual messages)</param>
         /// <returns></returns>
         public static async IAsyncEnumerable<Message> SplitLogEntryMessage(Message logEntryMessage)
         {
             var _inputFlexBuffer = new FlexReadBuffer();
+            var logEntryStream = new MemoryStream(logEntryMessage.Content);
             
-            await FlexReadBuffer.DeserializeAsync(new MemoryStream(logEntryMessage.Content), _inputFlexBuffer);
-
             var bytesToRead = logEntryMessage.Length;
             while (bytesToRead > 0)
-            { 
+            {
+                await FlexReadBuffer.DeserializeAsync(logEntryStream, _inputFlexBuffer);
                 bytesToRead -= _inputFlexBuffer.Length;
                 var _cursor = _inputFlexBuffer.LengthLength; // this way we don't need to compute how much space was used to represent the length of the buffer.
                 var firstByte = _inputFlexBuffer.Buffer[_cursor];
@@ -40,12 +40,15 @@ namespace Ambrosia
                     case AmbrosiaRuntimeLBConstants.upgradeTakeCheckpointByte:
                     case AmbrosiaRuntimeLBConstants.upgradeServiceByte:
                     case AmbrosiaRuntimeLBConstants.takeSubCheckpointByte:
-                        // Un-batchable messages -> return them and end the processing!
-                        yield return logEntryMessage;
-                        yield break;
                     case AmbrosiaRuntimeLBConstants.RPCByte:
-                        yield return logEntryMessage;
-                        yield break;
+                        // Un-batchable messages -> they only contain a single event
+                        // BUT: We might have more than one message within a single Log Record -> We need to return them as separate events!
+                        var singleMessage = new AmbrosiaMessage();
+                        singleMessage.Length = _inputFlexBuffer.Length;
+                        singleMessage.Content = new byte[singleMessage.Length];
+                        Buffer.BlockCopy(_inputFlexBuffer.Buffer, 0, singleMessage.Content, 0, singleMessage.Length);
+                        yield return singleMessage;
+                        break;
                     case AmbrosiaRuntimeLBConstants.RPCBatchByte:
                     case AmbrosiaRuntimeLBConstants.CountReplayableRPCBatchByte:
                         // Batched messages -> process them!
@@ -95,8 +98,7 @@ namespace Ambrosia
                             _cursor += lengthOfCurrentRPC; // Move position to next message
                             yield return message;
                         }
-
-                        yield break;
+                        break;
                     default:
                     {
                         var s = $"Illegal leading byte in message: {firstByte}";
@@ -107,9 +109,10 @@ namespace Ambrosia
                         yield break; // If the message was "faulty" we might as well return it completely (as we do not know how to handle it)
                     }
                 }
+                
+                // Reset buffer to load next message/event from log record
+                _inputFlexBuffer.ResetBuffer();
             }
-
-            _inputFlexBuffer.ResetBuffer();
         }
     }
 }

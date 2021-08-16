@@ -1936,7 +1936,19 @@ namespace Ambrosia
             public Committer Committer { get; set; }
             public ConcurrentDictionary<string, InputConnectionRecord> Inputs { get; set; }
             public long LastCommittedCheckpoint { get; set; }
+            /// <summary>
+            /// Holds information about the last committed sub-checkpoint
+            /// </summary>
+            public long LastCommittedSubCheckpoint { get; set; }
             public long LastLogFile { get; set; }
+            /// <summary>
+            /// Holds information about the offset within the log file to restart processing efficiently!
+            /// </summary>
+            public long LastLogFileOffset { get; set; }
+            /// <summary>
+            /// Holds information about the last processed message within the log record (as we split batches into single messages for better checkpointing)
+            /// </summary>
+            public long LastProcessedMessage { get; set; }
             public AARole MyRole { get; set; }
             public ConcurrentDictionary<string, OutputConnectionRecord> Outputs { get; set; }
             public long ShardID { get; set; }
@@ -1948,7 +1960,10 @@ namespace Ambrosia
             state.Committer = _committer;
             state.Inputs = _inputs;
             state.LastCommittedCheckpoint = _lastCommittedCheckpoint;
+            state.LastCommittedSubCheckpoint = _lastCommittedSubCheckpoint;
             state.LastLogFile = _lastLogFile;
+            state.LastProcessedMessage = _lastProcessedMessage;
+            state.LastLogFileOffset = _lastLogFileOffset;
             state.MyRole = _myRole;
             state.Outputs = _outputs;
         }
@@ -1959,7 +1974,10 @@ namespace Ambrosia
             _committer = state.Committer;
             _inputs = state.Inputs;
             _lastCommittedCheckpoint = state.LastCommittedCheckpoint;
+            _lastCommittedSubCheckpoint = state.LastCommittedSubCheckpoint;
             _lastLogFile = state.LastLogFile;
+            _lastProcessedMessage = state.LastProcessedMessage;
+            _lastLogFileOffset = state.LastLogFileOffset;
             _myRole = state.MyRole;
             _outputs = state.Outputs;
         }
@@ -2097,7 +2115,7 @@ namespace Ambrosia
         // Azure table for service instance metadata information
         CloudTable _serviceInstanceTable;
         long _lastCommittedCheckpoint;
-        private long _lastCommittedSubCheckpoint;
+        long _lastCommittedSubCheckpoint;
 
         // Azure blob for writing commit log and checkpoint
         ILogWriter _checkpointWriter;
@@ -2112,6 +2130,10 @@ namespace Ambrosia
         long _newLogTriggerSize;
         // The numeric suffix of the log file currently being read or written to
         long _lastLogFile;
+        // The last processed message from the last log record. -> we split batches to process each message separately and thus may need an offset to detect the correct message in batches.
+        long _lastProcessedMessage;
+        // The offset of the current message within the log
+        long _lastLogFileOffset;
         // A locking variable (with compare and swap) used to eliminate redundant log moves
         int _movingToNextLog = 0;
         // A handle to a file used for an upgrading secondary to bring down the primary and prevent primary promotion amongst secondaries.
@@ -2290,6 +2312,7 @@ namespace Ambrosia
         }
 
         private async Task RecoverOrStartAsync(long checkpointToLoad = -1,
+                                               long subCheckpointToLoad = -1,
                                                bool testUpgrade = false)
         {
             CheckpointingService = false;
@@ -2305,7 +2328,7 @@ namespace Ambrosia
                 Recovering = true;
                 _restartWithRecovery = true;
                 MachineState state = new MachineState(_shardID);
-                await RecoverAsync(state, checkpointToLoad, testUpgrade);
+                await RecoverAsync(state, checkpointToLoad, subCheckpointToLoad, testUpgrade);
                 UpdateAmbrosiaState(state);
                 await PrepareToBecomePrimaryAsync();
                 // Start task to periodically check if someone's trying to upgrade
@@ -2320,17 +2343,19 @@ namespace Ambrosia
             }
         }
 
-        private async Task RecoverAsync(MachineState state, long checkpointToLoad = -1, bool testUpgrade = false)
+        private async Task RecoverAsync(MachineState state, long checkpointToLoad = -1, long subCheckpointToLoad = -1, bool testUpgrade = false)
         {
             if (!_runningRepro)
             {
                 // We are recovering - find the last committed checkpoint
                 state.LastCommittedCheckpoint = long.Parse(RetrieveServiceInfo(InfoTitle("LastCommittedCheckpoint", state.ShardID)));
+                // Recovery for normal execution bases on full checkpoints as sub-checkpoints are only created on replay processing
             }
             else
             {
                 // We are running a repro
                 state.LastCommittedCheckpoint = checkpointToLoad;
+                state.LastCommittedSubCheckpoint = subCheckpointToLoad;
             }
             // Start from the log file associated with the last committed checkpoint
             state.LastLogFile = state.LastCommittedCheckpoint;
@@ -2348,7 +2373,11 @@ namespace Ambrosia
                 }
             }
 
-            using (ILogReader checkpointStream = LogReaderStaticPicker.curStatic.Generate(CheckpointName(state.LastCommittedCheckpoint, state.ShardID)))
+            var checkpointFileName = state.LastCommittedSubCheckpoint > 0
+                ? SubCheckpointName(state.LastCommittedCheckpoint, state.LastCommittedSubCheckpoint, state.ShardID)
+                : CheckpointName(state.LastCommittedCheckpoint, state.ShardID);
+
+            using (ILogReader checkpointStream = LogReaderStaticPicker.curStatic.Generate(checkpointFileName))
             {
                 // recover the checkpoint - Note that everything except the replay data must have been written successfully or we
                 // won't think we have a valid checkpoint here. Since we can only be the secondary or checkpointer, the committer doesn't write to the replay log
@@ -2359,6 +2388,13 @@ namespace Ambrosia
                 // Recover output connections
                 state.Outputs = state.Outputs.AmbrosiaDeserialize(checkpointStream, this);
                 UnbufferNonreplayableCalls(state.Outputs);
+                // Deserialize other helpful information about the current processing within the log file
+                if (state.LastCommittedSubCheckpoint > 0)
+                {
+                    state.LastProcessedMessage = checkpointStream.ReadLongFixed();
+                    state.LastLogFileOffset = checkpointStream.ReadLongFixed();
+                }
+
                 // Restore new service from checkpoint
                 var serviceCheckpoint = new FlexReadBuffer();
                 FlexReadBuffer.Deserialize(checkpointStream, serviceCheckpoint);
@@ -2414,6 +2450,7 @@ namespace Ambrosia
             // We are starting for the first time. This is the primary
             _restartWithRecovery = false;
             _lastCommittedCheckpoint = 0;
+            _lastCommittedSubCheckpoint = 0;
             _lastLogFile = 0;
             _inputs = new ConcurrentDictionary<string, InputConnectionRecord>();
             _outputs = new ConcurrentDictionary<string, OutputConnectionRecord>();
@@ -2774,10 +2811,16 @@ namespace Ambrosia
             var clearedCommitterWrite = false;
             var haveWriterLockForNonActiveActive = false;
             ILogWriter lastLogFileStreamWriter = null;
+
+            // If we have stored an offset -> use it to "fast-forward" to the relevant part within the log
+            replayStream.Position = state.LastLogFileOffset >= 0 ? state.LastLogFileOffset : replayStream.Position;
+            
             // Keep replaying commits until we run out of replay data
             while (true)
             {
                 long logRecordPos = replayStream.Position;
+                // Update the offset to always store the correct last position.
+                state.LastLogFileOffset = logRecordPos;
                 int commitSize;
                 try
                 {
@@ -2918,6 +2961,7 @@ namespace Ambrosia
                             // We've locked the log. There may be more log to consume. Continue until we hit the true end.
                             haveWriterLockForNonActiveActive = true;
                             replayStream.Position = logRecordPos;
+                            state.LastLogFileOffset = logRecordPos;
                             continue;
                         }
                         else
@@ -2966,6 +3010,7 @@ namespace Ambrosia
                     }
                     var myRoleBeforeEOLChecking = state.MyRole;
                     replayStream.Position = logRecordPos;
+                    state.LastLogFileOffset = logRecordPos;
                     var newLastLogFile = state.LastLogFile;
                     if (_runningRepro)
                     {
@@ -3053,49 +3098,49 @@ namespace Ambrosia
                 combinedMessage.Content = tempBuf;
                 var combinedHeader = new AmbrosiaHeader(headerBuf);
 
+                var lastProcessedMessage = 0;
                 await foreach (var message in LogEntryHelper.SplitLogEntryMessage(combinedMessage))
                 {
+                    if (lastProcessedMessage < state.LastProcessedMessage)
+                    {
+                        // Skip the message as we have already processed it within the sub-checkpoint 
+                        lastProcessedMessage++;
+                        continue;
+                    }
+                    
                     // Generate Header for message
-                    var header = new AmbrosiaHeader();
-                    header.CommitterId = combinedHeader.CommitterId;
-                    header.LogRecordSequenceId = combinedHeader.LogRecordSequenceId;
-                    header.LogSize = Committer.HeaderSize + message.Length;
-                    header.CheckBytes = state.Committer.CheckBytes(message.Content, 0, message.Length);
-
-                    // Inserted code for checkpointing strategies
-                    var shouldTakeCheckpoint = false;
-                    State _state;
-                    switch (_checkpointingStrategy)
+                    AmbrosiaHeader header;
+                    if (message.Length != combinedMessage.Length)
                     {
-                        case null:
-                            shouldTakeCheckpoint = false;
-                            break;
-                        case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
-                            shouldTakeCheckpoint = strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID).Result;
-                            break;
-                        case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
-                            // How To:
-                            // 1. TakeSubCheckpointAsync
-                            // 2. Create State with checkpoint-stream
-                            // 3. Run strategy
-                            // 4. Remove or keep the corresponding checkpoint
-                            _state = await GetComponentStateAsync();
-                            shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
-                            break;
-                        default:
-                            shouldTakeCheckpoint = false;
-                            break;
+                        // If the message was splitted -> generate new Header
+                        header = new AmbrosiaHeader();
+                        header.CommitterId = combinedHeader.CommitterId;
+                        header.LogRecordSequenceId = combinedHeader.LogRecordSequenceId;
+                        header.LogSize = Committer.HeaderSize + message.Length;
+                        header.CheckBytes = state.Committer.CheckBytes(message.Content, 0, message.Length);
                     }
-
-                    if (shouldTakeCheckpoint)
+                    else
                     {
-                        await TakeSubCheckpointAsync();
+                        // If the message was not splitted -> keep previous header
+                        header = combinedHeader;
+                        // TODO: This is a "heuristic", as if it happens that the message is slightly altered (single batched RPC message gets converted into single RPC message) then the contents differ and the "old" header is incorrectly used. But I don't think this should happen...
                     }
-
+                    
                     // Do the actual work on the local service
                     _localServiceSendToStream.Write(AmbrosiaLogUtil.GetHeaderBytes(header), 0, Committer.HeaderSize);
                     _localServiceSendToStream.Write(message.Content, 0, message.Length);
+                    lastProcessedMessage++;
+                    
+                    // Take checkpoint after message was processed if necessary
+                    // Doing this _after_ processing of the message prevents checkpointing a message that may not have been processed (as the machine may fail during processing)
+                    // As the TakeCheckpointIfNecessaryAsync method requests the state of the component, and the component may currently process the current message (and may only
+                    //    process one message at a time) the checkpoint should be created _after_ the method was processed.
+                    await TakeCheckpointIfNecessaryAsync(state, lastProcessedMessage);
                 }
+                
+                // After processing message and possible checkpointing -> reset state.LastProcessedMessage to prevent skipping messages of the next log record.
+                state.LastProcessedMessage = -1;
+                
                 // Trim the outputs. Should clean as aggressively as during normal operation
                 foreach (var kv in trimDict)
                 {
@@ -3126,6 +3171,50 @@ namespace Ambrosia
                 // bump up the write ID in the committer in preparation for reading or writing the next page
                 state.Committer._nextWriteID++;
             }
+        }
+
+        private async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, long lastProcessedMessage)
+        {
+            // Inserted code for checkpointing strategies
+            bool shouldTakeCheckpoint;
+            State _state;
+            switch (_checkpointingStrategy)
+            {
+                case null:
+                    Trace.TraceWarning("No checkpointing strategy initialized. IC will not take any (sub-)checkpoints.");
+                    shouldTakeCheckpoint = false;
+                    break;
+                case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID);
+                    break;
+                case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                    // How To:
+                    // 1. TakeSubCheckpointAsync
+                    // 2. Create State with checkpoint-stream
+                    // 3. Run strategy
+                    // 4. Remove or keep the corresponding checkpoint
+                    _state = await GetComponentStateAsync();
+                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
+                    break;
+                default:
+                    return false;
+            }
+
+            if (shouldTakeCheckpoint)
+            {
+                // Combine Information about current processing
+                // We only logically split the logs for sub-checkpoints. Thus, a replay need further information about the current processing state.
+                state.LastProcessedMessage = lastProcessedMessage;
+                UpdateAmbrosiaState(state);
+
+                // Take Checkpoint
+                await TakeSubCheckpointAsync();
+                
+                // Load changes in state
+                LoadAmbrosiaState(state);
+            }
+
+            return shouldTakeCheckpoint;
         }
 
         // Thread for listening to the local service
@@ -4060,6 +4149,10 @@ namespace Ambrosia
             _inputs.AmbrosiaSerialize(_checkpointWriter);
             // Serialize output connections
             _outputs.AmbrosiaSerialize(_checkpointWriter);
+            // Serialize other helpful information about the current processing within the log file
+            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
+            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
+            // We do not need to write the "_lastCommittedSubCheckpoint" information, as this information should always be given from outside (the developer/ttd specifies the last sub-checkpoint to load)
             foreach (var outputRecord in _outputs)
             {
                 outputRecord.Value.BufferedOutput.ReleaseAppendLock();
@@ -4129,6 +4222,10 @@ namespace Ambrosia
             _inputs.AmbrosiaSerialize(_checkpointWriter);
             // Serialize output connections
             _outputs.AmbrosiaSerialize(_checkpointWriter);
+            // Serialize other helpful information about the current processing within the log file
+            /* TODO: To prevent breaking older checkpoints -> Do not de-/serialize last mid-processing information (of splitted log-processing). This should be enabled in the future tho.
+            _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
+            _checkpointWriter.WriteLongFixed(_lastLogFileOffset);*/
             foreach (var outputRecord in _outputs)
             {
                 outputRecord.Value.BufferedOutput.ReleaseAppendLock();
@@ -4361,6 +4458,7 @@ namespace Ambrosia
                                     long checkpointToLoad,
                                     int version,
                                     bool testUpgrade,
+                                    long subCheckpointToLoad = -1,
                                     int serviceReceiveFromPort = 0,
                                     int serviceSendToPort = 0,
                                     string serviceCheckpointPath = "",
@@ -4380,7 +4478,7 @@ namespace Ambrosia
             InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath);
             
             InitializeLogWriterStatics();
-            RecoverOrStartAsync(checkpointToLoad, testUpgrade).Wait();
+            RecoverOrStartAsync(checkpointToLoad, subCheckpointToLoad, testUpgrade).Wait();
         }
         
         private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath) {
@@ -4388,7 +4486,7 @@ namespace Ambrosia
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
             // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
-            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), false);
+            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), true);
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
