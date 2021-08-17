@@ -1949,6 +1949,10 @@ namespace Ambrosia
             /// Holds information about the last processed message within the log record (as we split batches into single messages for better checkpointing)
             /// </summary>
             public long LastProcessedMessage { get; set; }
+            /// <summary>
+            /// Holds counter over all processed (rpc) events.
+            /// </summary>
+            public long TotalProcessedEvents { get; set; }
             public AARole MyRole { get; set; }
             public ConcurrentDictionary<string, OutputConnectionRecord> Outputs { get; set; }
             public long ShardID { get; set; }
@@ -1962,8 +1966,9 @@ namespace Ambrosia
             state.LastCommittedCheckpoint = _lastCommittedCheckpoint;
             state.LastCommittedSubCheckpoint = _lastCommittedSubCheckpoint;
             state.LastLogFile = _lastLogFile;
-            state.LastProcessedMessage = _lastProcessedMessage;
             state.LastLogFileOffset = _lastLogFileOffset;
+            state.LastProcessedMessage = _lastProcessedMessage;
+            state.TotalProcessedEvents = _totalProcessedEvents;
             state.MyRole = _myRole;
             state.Outputs = _outputs;
         }
@@ -1976,8 +1981,9 @@ namespace Ambrosia
             _lastCommittedCheckpoint = state.LastCommittedCheckpoint;
             _lastCommittedSubCheckpoint = state.LastCommittedSubCheckpoint;
             _lastLogFile = state.LastLogFile;
-            _lastProcessedMessage = state.LastProcessedMessage;
             _lastLogFileOffset = state.LastLogFileOffset;
+            _lastProcessedMessage = state.LastProcessedMessage;
+            _totalProcessedEvents = state.TotalProcessedEvents;
             _myRole = state.MyRole;
             _outputs = state.Outputs;
         }
@@ -2055,7 +2061,7 @@ namespace Ambrosia
         ConcurrentDictionary<string, InputConnectionRecord> _inputs;
         ConcurrentDictionary<string, OutputConnectionRecord> _outputs;
 
-        internal CheckpointingStrategy<AmbrosiaLogEntry> _checkpointingStrategy;
+        internal CheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> _checkpointingStrategy;
         
         internal int _localServiceReceiveFromPort;           // specifiable on the command line
         internal int _localServiceSendToPort;                // specifiable on the command line 
@@ -2130,10 +2136,12 @@ namespace Ambrosia
         long _newLogTriggerSize;
         // The numeric suffix of the log file currently being read or written to
         long _lastLogFile;
-        // The last processed message from the last log record. -> we split batches to process each message separately and thus may need an offset to detect the correct message in batches.
-        long _lastProcessedMessage;
         // The offset of the current message within the log
         long _lastLogFileOffset;
+        // The last processed message from the last log record. -> we split batches to process each message separately and thus may need an offset to detect the correct message in batches.
+        long _lastProcessedMessage;
+        // The count of totally processed (rpc) events.
+        long _totalProcessedEvents;
         // A locking variable (with compare and swap) used to eliminate redundant log moves
         int _movingToNextLog = 0;
         // A handle to a file used for an upgrading secondary to bring down the primary and prevent primary promotion amongst secondaries.
@@ -2400,13 +2408,16 @@ namespace Ambrosia
                     {
                         state.LastProcessedMessage = checkpointStream.ReadLongFixed();
                         state.LastLogFileOffset = checkpointStream.ReadLongFixed();
+                        state.TotalProcessedEvents = checkpointStream.ReadLongFixed();
                     }
                     catch (Exception e)
                     {
                         // It is expected that this method may fail if a checkpoint was created prior to the additional information added
                         // -> To prevent breaking older checkpoints: just ignore issues with reading these information
-                        state.LastProcessedMessage = 0;
-                        state.LastLogFileOffset = 0;
+                        // -> If only a subset of the information could be read, still use this information and skip any unread variable
+                        state.LastProcessedMessage = state.LastProcessedMessage > 0 ? state.LastProcessedMessage : 0;
+                        state.LastLogFileOffset = state.LastLogFileOffset > 0 ? state.LastLogFileOffset : 0;
+                        state.TotalProcessedEvents = state.TotalProcessedEvents > 0 ? state.TotalProcessedEvents : 0;
                     }
                 }
             }
@@ -3140,12 +3151,13 @@ namespace Ambrosia
                     _localServiceSendToStream.Write(AmbrosiaLogUtil.GetHeaderBytes(header), 0, Committer.HeaderSize);
                     _localServiceSendToStream.Write(message.Content, 0, message.Length);
                     lastProcessedMessage++;
+                    state.TotalProcessedEvents++;
                     
                     // Take checkpoint after message was processed if necessary
                     // Doing this _after_ processing of the message prevents checkpointing a message that may not have been processed (as the machine may fail during processing)
                     // As the TakeCheckpointIfNecessaryAsync method requests the state of the component, and the component may currently process the current message (and may only
                     //    process one message at a time) the checkpoint should be created _after_ the method was processed.
-                    await TakeCheckpointIfNecessaryAsync(state, lastProcessedMessage);
+                    await TakeCheckpointIfNecessaryAsync(state, message, lastProcessedMessage);
                 }
                 
                 // After processing message and possible checkpointing -> reset state.LastProcessedMessage to prevent skipping messages of the next log record.
@@ -3183,28 +3195,28 @@ namespace Ambrosia
             }
         }
 
-        private async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, long lastProcessedMessage)
+        private async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, Message message, long lastProcessedMessage)
         {
             // Inserted code for checkpointing strategies
             bool shouldTakeCheckpoint;
-            State _state;
             switch (_checkpointingStrategy)
             {
                 case null:
                     Trace.TraceWarning("No checkpointing strategy initialized. IC will not take any (sub-)checkpoints.");
                     shouldTakeCheckpoint = false;
                     break;
-                case StaticCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                case StaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
                     shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID);
                     break;
-                case DynamicCheckpointingStrategy<AmbrosiaLogEntry> strategy:
+                case DynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
                     // How To:
                     // 1. TakeSubCheckpointAsync
                     // 2. Create State with checkpoint-stream
                     // 3. Run strategy
                     // 4. Remove or keep the corresponding checkpoint
-                    _state = await GetComponentStateAsync();
-                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID, _state, null);
+                    var _state = await GetComponentStateAsync();
+                    var _event = await LogEntryHelper.ExtractEventAsync(message, state.TotalProcessedEvents);
+                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, _event);
                     break;
                 default:
                     return false;
@@ -4174,6 +4186,7 @@ namespace Ambrosia
             // That way the information can be skipped if it is not included in a checkpoint!
             _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
             _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
+            _checkpointWriter.WriteLongFixed(_totalProcessedEvents);
             _checkpointWriter.Flush();
             _lastCommittedSubCheckpoint++;
 
@@ -4248,6 +4261,7 @@ namespace Ambrosia
             // That way the information can be skipped if it is not included in a checkpoint!
             _checkpointWriter.WriteLongFixed(_lastProcessedMessage);
             _checkpointWriter.WriteLongFixed(_lastLogFileOffset);
+            _checkpointWriter.WriteLongFixed(_totalProcessedEvents);
             _checkpointWriter.Flush();
             _lastCommittedCheckpoint++;
             _lastCommittedSubCheckpoint = 0;
@@ -4500,7 +4514,7 @@ namespace Ambrosia
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
             // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
-            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), true);
+            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif

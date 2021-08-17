@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using DebuggingSupport;
 using static Ambrosia.StreamCommunicator;
 
@@ -113,6 +114,53 @@ namespace Ambrosia
                 // Reset buffer to load next message/event from log record
                 _inputFlexBuffer.ResetBuffer();
             }
+        }
+
+        public static async Task<Event> ExtractEventAsync(Message message, long timestamp)
+        {
+            var _inputFlexBuffer = new FlexReadBuffer();
+            await FlexReadBuffer.DeserializeAsync(new MemoryStream(message.Content), _inputFlexBuffer);
+            var _cursor = _inputFlexBuffer.LengthLength; // this way we don't need to compute how much space was used to represent the length of the buffer.
+            var firstByte = _inputFlexBuffer.Buffer[_cursor];
+            
+            if (firstByte != AmbrosiaRuntimeLBConstants.RPCByte)
+            {
+                // No RPC -> No Event! (Dummy-Event to symbolize that there was an event but not a relevant one)
+                return new AmbrosiaEvent(timestamp, EventType.Internal, -1);
+            }
+
+            _cursor++;
+            var returnValueType = (ReturnValueTypes)_inputFlexBuffer.Buffer[_cursor++];
+            if (returnValueType != ReturnValueTypes.None) // receiving a return value
+            {
+                // No "real" RPC but only a response -> No Event!
+                return null;
+            }
+
+            var methodId = _inputFlexBuffer.Buffer.ReadBufferedInt(_cursor);
+            _cursor += IntSize(methodId);
+            var _rpcType = (RpcTypes.RpcType)_inputFlexBuffer.Buffer[_cursor++];
+            var rpcType = _rpcType is RpcTypes.RpcType.ReturnValue ? EventType.External :
+                _rpcType is RpcTypes.RpcType.FireAndForget ? EventType.External :
+                _rpcType is RpcTypes.RpcType.Impulse ? EventType.Internal :
+                throw new ArgumentOutOfRangeException();
+
+            if (!_rpcType.IsFireAndForget())
+            {
+                // read return address and sequence number
+                var senderOfRPCLength = _inputFlexBuffer.Buffer.ReadBufferedInt(_cursor);
+                var sizeOfSender = IntSize(senderOfRPCLength);
+                _cursor += sizeOfSender;
+                _cursor += senderOfRPCLength;
+                var sequenceNumber = _inputFlexBuffer.Buffer.ReadBufferedLong(_cursor);
+                _cursor += LongSize(sequenceNumber);
+            }
+            
+            var lengthOfSerializedArguments = message.Content.Length - _cursor;
+            byte[] serializedMethods = new byte[lengthOfSerializedArguments];
+            Buffer.BlockCopy(_inputFlexBuffer.Buffer, _cursor, serializedMethods, 0, lengthOfSerializedArguments);
+
+            return new AmbrosiaEvent(timestamp, rpcType, methodId, serializedMethods);
         }
     }
 }
