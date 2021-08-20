@@ -3153,11 +3153,15 @@ namespace Ambrosia
                     lastProcessedMessage++;
                     state.TotalProcessedEvents++;
                     
+                    // Combine Information about current processing
+                    // We only logically split the logs for sub-checkpoints. Thus, a replay need further information about the current processing state.
+                    state.LastProcessedMessage = lastProcessedMessage;
+                    
                     // Take checkpoint after message was processed if necessary
                     // Doing this _after_ processing of the message prevents checkpointing a message that may not have been processed (as the machine may fail during processing)
-                    // As the TakeCheckpointIfNecessaryAsync method requests the state of the component, and the component may currently process the current message (and may only
+                    // As the TakeSubCheckpointIfNecessaryAsync method requests the state of the component, and the component may currently process the current message (and may only
                     //    process one message at a time) the checkpoint should be created _after_ the method was processed.
-                    await TakeCheckpointIfNecessaryAsync(state, message, lastProcessedMessage);
+                    await TakeSubCheckpointIfNecessaryAsync(state, message);
                 }
                 
                 // After processing message and possible checkpointing -> reset state.LastProcessedMessage to prevent skipping messages of the next log record.
@@ -3195,19 +3199,20 @@ namespace Ambrosia
             }
         }
 
-        private async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, Message message, long lastProcessedMessage)
+        private async Task<bool> ShouldTakeCheckpointAsync(MachineState state, AmbrosiaEvent @event, Dictionary<string, object> additionalParams = null)
         {
+            additionalParams ??= new Dictionary<string, object>();
+
             // Inserted code for checkpointing strategies
-            bool shouldTakeCheckpoint;
             switch (_checkpointingStrategy)
             {
                 case null:
                     Trace.TraceWarning("No checkpointing strategy initialized. IC will not take any (sub-)checkpoints.");
-                    shouldTakeCheckpoint = false;
-                    break;
+                    return false;
                 case StaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
-                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.Committer._nextWriteID);
-                    break;
+                    @event.AddAdditionalParams(additionalParams);
+                    
+                    return await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, @event);
                 case DynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
                     // How To:
                     // 1. TakeSubCheckpointAsync
@@ -3215,18 +3220,35 @@ namespace Ambrosia
                     // 3. Run strategy
                     // 4. Remove or keep the corresponding checkpoint
                     var _state = await GetComponentStateAsync();
-                    var _event = await LogEntryHelper.ExtractEventAsync(message, state.TotalProcessedEvents);
-                    shouldTakeCheckpoint = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, _event);
-                    break;
+                    @event.AddAdditionalParams(additionalParams);
+                    
+                    return await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, @event);
                 default:
                     return false;
             }
+        }
+
+        private async Task<bool> ShouldTakeCheckpointAsync(MachineState state, Message message, Dictionary<string, object> additionalParams = null)
+        {
+            additionalParams ??= new Dictionary<string, object>();
+
+            if (_checkpointingStrategy == null)
+            {
+                Trace.TraceWarning("No checkpointing strategy initialized. IC will not take any (sub-)checkpoints.");
+                return false;
+            }
+            
+            var _event = await LogEntryHelper.ExtractEventAsync(state.TotalProcessedEvents, message);
+            
+            return await ShouldTakeCheckpointAsync(state, _event, additionalParams);
+        }
+        
+        internal async Task<bool> TakeSubCheckpointIfNecessaryAsync(MachineState state, Message message)
+        {
+            var shouldTakeCheckpoint = await ShouldTakeCheckpointAsync(state, message);
 
             if (shouldTakeCheckpoint)
             {
-                // Combine Information about current processing
-                // We only logically split the logs for sub-checkpoints. Thus, a replay need further information about the current processing state.
-                state.LastProcessedMessage = lastProcessedMessage;
                 UpdateAmbrosiaState(state);
 
                 // Take Checkpoint
@@ -3234,6 +3256,42 @@ namespace Ambrosia
                 
                 // Load changes in state
                 LoadAmbrosiaState(state);
+            }
+
+            return shouldTakeCheckpoint;
+        }
+
+        internal async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, AmbrosiaEvent @event, Dictionary<string, object> addtionalParams)
+        {
+            var shouldTakeCheckpoint = await ShouldTakeCheckpointAsync(state, @event, addtionalParams);
+            
+            if (shouldTakeCheckpoint)
+            {
+                // Make sure only one input thread is moving to the next log file. Won't break the system if we don't do this, but could result in
+                // empty log files
+                if (Interlocked.CompareExchange(ref _movingToNextLog, 1, 0) == 0)
+                {
+                    await MoveServiceToNextLogFileAsync();
+                    _movingToNextLog = 0;
+                }
+            }
+
+            return shouldTakeCheckpoint;
+        }
+        
+        internal async Task<bool> TakeCheckpointIfNecessaryAsync(MachineState state, Message message, Dictionary<string, object> additionalParams = null)
+        {
+            var shouldTakeCheckpoint = await ShouldTakeCheckpointAsync(state, message, additionalParams);
+
+            if (shouldTakeCheckpoint)
+            {
+                // Make sure only one input thread is moving to the next log file. Won't break the system if we don't do this, but could result in
+                // empty log files
+                if (Interlocked.CompareExchange(ref _movingToNextLog, 1, 0) == 0)
+                {
+                    await MoveServiceToNextLogFileAsync();
+                    _movingToNextLog = 0;
+                }
             }
 
             return shouldTakeCheckpoint;
@@ -3255,63 +3313,6 @@ namespace Ambrosia
                     // Do an async message read. Note that the async aspect of this is slow.
                     FlexReadBuffer.Deserialize(_localServiceReceiveFromStream, localServiceBuffer);
                     ProcessSyncLocalMessage(ref localServiceBuffer, batchServiceBuffer);
-                    /* Disabling because of BUGBUG. Eats checkpoint bytes in some circumstances before checkpointer can deal with it.
-                                        // Process more messages from the local service if available before going async again, doing this here because
-                                        // not all language shims will be good citizens here, and we may need to process small messages to avoid inefficiencies
-                                        // in LAR.
-                                        int curPosInBuffer = 0;
-                                        int readBytes = 0;
-                                        while (readBytes != 0 || _localServiceReceiveFromStream.DataAvailable)
-                                        {
-                                            // Read data into buffer to avoid lock contention of reading directly from the stream
-                                            while ((_localServiceReceiveFromStream.DataAvailable && readBytes < bufferSize) || !bytes.EnoughBytesForReadBufferedInt(0, readBytes))
-                                            {
-                                                readBytes += _localServiceReceiveFromStream.Read(bytes, readBytes, bufferSize - readBytes);
-                                            }
-                                            // Continue loop as long as we can meaningfully read a message length
-                                            var memStream = new MemoryStream(bytes, 0, readBytes);
-                                            while (bytes.EnoughBytesForReadBufferedInt(curPosInBuffer, readBytes - curPosInBuffer))
-                                            {
-                                                // Read the length of the next message
-                                                var messageSize = memStream.ReadInt();
-                                                var messageSizeSize = StreamCommunicator.IntSize(messageSize);
-                                                memStream.Position -= messageSizeSize;
-                                                if (curPosInBuffer + messageSizeSize + messageSize > readBytes)
-                                                {
-                                                    // didn't read the full message into the buffer. It must be torn
-                                                    if (messageSize + messageSizeSize > bufferSize)
-                                                    {
-                                                        // Buffer isn't big enough to hold the whole torn event even if empty. Increase the buffer size so the message can fit.
-                                                        bufferSize = messageSize + messageSizeSize;
-                                                        var newBytes = new byte[bufferSize];
-                                                        Buffer.BlockCopy(bytes, curPosInBuffer, newBytes, 0, readBytes - curPosInBuffer);
-                                                        bytes = newBytes;
-                                                        bytesBak = new byte[bufferSize];
-                                                        readBytes -= curPosInBuffer;
-                                                        curPosInBuffer = 0;
-                                                    }
-                                                    break;
-                                                }
-                                                else
-                                                {
-                                                    // Count this message since it is fully in the buffer
-                                                    FlexReadBuffer.Deserialize(memStream, localServiceBuffer);
-                                                    ProcessSyncLocalMessage(ref localServiceBuffer, batchServiceBuffer);
-                                                    curPosInBuffer += messageSizeSize + messageSize;
-                                                }
-                                            }
-                                            memStream.Dispose();
-                                            // Shift torn message to the beginning unless it is the first one
-                                            if (curPosInBuffer > 0)
-                                            {
-                                                Buffer.BlockCopy(bytes, curPosInBuffer, bytesBak, 0, readBytes - curPosInBuffer);
-                                                var tempBytes = bytes;
-                                                bytes = bytesBak;
-                                                bytesBak = tempBytes;
-                                                readBytes -= curPosInBuffer;
-                                                curPosInBuffer = 0;
-                                            }
-                                        }  */
                 }
             }
             catch (Exception e)
