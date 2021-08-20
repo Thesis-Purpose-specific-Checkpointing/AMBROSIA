@@ -4093,6 +4093,7 @@ namespace Ambrosia
 
         public async Task<String> RequestComponentStateAsync()
         {
+            await _committer.SleepAsync();
             _committer.QuiesceServiceWithSendCheckpointRequest(subCheckpoint: true);
 
             CheckpointingService = true;
@@ -4116,6 +4117,8 @@ namespace Ambrosia
             // Cleanup
             LastReceivedCheckpoint.ThrowAwayBuffer();
             LastReceivedCheckpoint = null;
+            
+            await _committer.WakeupAsync();
             
             return _state;
         }
@@ -4150,6 +4153,7 @@ namespace Ambrosia
 
         public async Task TakeSubCheckpointAsync()
         {
+            await _committer.SleepAsync();
             _committer.QuiesceServiceWithSendCheckpointRequest();
             
             // await CheckpointAsync();
@@ -4189,6 +4193,7 @@ namespace Ambrosia
             _checkpointWriter.WriteLongFixed(_totalProcessedEvents);
             _checkpointWriter.Flush();
             _lastCommittedSubCheckpoint++;
+            await _committer.WakeupAsync();
 
             // Trim output buffers of inputs, since the inputs are now part of the checkpoint and can't be lost. Must do this after the checkpoint has been
             // successfully written
