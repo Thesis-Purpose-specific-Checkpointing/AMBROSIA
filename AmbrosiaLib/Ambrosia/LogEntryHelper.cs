@@ -11,6 +11,106 @@ namespace Ambrosia
     public class LogEntryHelper
     {
 
+        public static async IAsyncEnumerable<Message> SplitLogEntryMessage(FlexReadBuffer flexReadBuffer)
+        {
+            var bytesToRead = flexReadBuffer.Length;
+            var _cursor = 0;
+            while (bytesToRead > 0)
+            {
+                bytesToRead -= flexReadBuffer.Length;
+                _cursor += flexReadBuffer.LengthLength; // this way we don't need to compute how much space was used to represent the length of the buffer.
+                var firstByte = flexReadBuffer.Buffer[_cursor];
+
+                switch (firstByte)
+                {
+                    case AmbrosiaRuntimeLBConstants.InitalMessageByte:
+                    case AmbrosiaRuntimeLBConstants.checkpointByte:
+                    case AmbrosiaRuntimeLBConstants.takeCheckpointByte:
+                    case AmbrosiaRuntimeLBConstants.becomingPrimaryByte:
+                    case AmbrosiaRuntimeLBConstants.takeBecomingPrimaryCheckpointByte:
+                    case AmbrosiaRuntimeLBConstants.upgradeTakeCheckpointByte:
+                    case AmbrosiaRuntimeLBConstants.upgradeServiceByte:
+                    case AmbrosiaRuntimeLBConstants.takeSubCheckpointByte:
+                    case AmbrosiaRuntimeLBConstants.RPCByte:
+                        // Un-batchable messages -> they only contain a single event
+                        // BUT: We might have more than one message within a single Log Record -> We need to return them as separate events!
+                        var singleMessage = new AmbrosiaMessage();
+                        singleMessage.Length = flexReadBuffer.Length;
+                        singleMessage.Content = new byte[singleMessage.Length];
+                        Buffer.BlockCopy(flexReadBuffer.Buffer, 0, singleMessage.Content, 0, singleMessage.Length);
+                        yield return singleMessage;
+                        break;
+                    case AmbrosiaRuntimeLBConstants.RPCBatchByte:
+                    case AmbrosiaRuntimeLBConstants.CountReplayableRPCBatchByte:
+                        // Batched messages -> process them!
+                        var numberOfRPCs = 1;
+                        var lengthOfCurrentRPC = 0;
+                        
+                        _cursor++;
+                        numberOfRPCs = flexReadBuffer.Buffer.ReadBufferedInt(_cursor);
+                        _cursor += IntSize(numberOfRPCs);
+                        if (firstByte == AmbrosiaRuntimeLBConstants.CountReplayableRPCBatchByte)
+                        {
+                            var numReplayableRPCs = flexReadBuffer.Buffer.ReadBufferedInt(_cursor);
+                            _cursor += IntSize(numReplayableRPCs);
+                        }
+                        
+                        // Iterate over all messages within this batch:
+                        for (int i = 0; i < numberOfRPCs; i++)
+                        {
+                            if (numberOfRPCs == 1)
+                            {
+                                // If this batch only contains a single message -> send it!
+                                singleMessage = new AmbrosiaMessage();
+                                singleMessage.Length = flexReadBuffer.Length;
+                                singleMessage.Content = new byte[singleMessage.Length];
+                                Buffer.BlockCopy(flexReadBuffer.Buffer, 0, singleMessage.Content, 0, singleMessage.Length);
+                                yield return singleMessage;
+                                break;
+                            }
+                            
+                            if (1 < numberOfRPCs)
+                            {
+                                lengthOfCurrentRPC = flexReadBuffer.Buffer.ReadBufferedInt(_cursor);
+                                _cursor += IntSize(lengthOfCurrentRPC);
+                            }
+                            
+                            var shouldBeRPCByte = flexReadBuffer.Buffer[_cursor];
+                            if (shouldBeRPCByte != AmbrosiaRuntimeLBConstants.RPCByte)
+                            {
+                                Console.WriteLine("UNKNOWN BYTE: {0}!!", shouldBeRPCByte);
+                                throw new Exception("Illegal leading byte in message");
+                            }
+
+                            var rpcContent = new byte[IntSize(lengthOfCurrentRPC) + lengthOfCurrentRPC];
+                            Buffer.BlockCopy(flexReadBuffer.Buffer, _cursor, rpcContent, IntSize(lengthOfCurrentRPC), lengthOfCurrentRPC);
+                            rpcContent.WriteInt(0, lengthOfCurrentRPC);
+                            
+                            var message = new AmbrosiaMessage();
+                            message.Content = rpcContent;
+                            message.Length = message.Content.Length;
+
+                            _cursor += lengthOfCurrentRPC; // Move position to next message
+                            yield return message;
+                        }
+                        break;
+                    default:
+                    {
+                        var s = $"Illegal leading byte in message: {firstByte}";
+#if DEBUG
+                        Trace.TraceWarning(s);
+#endif
+                        singleMessage = new AmbrosiaMessage();
+                        singleMessage.Length = flexReadBuffer.Length;
+                        singleMessage.Content = new byte[singleMessage.Length];
+                        Buffer.BlockCopy(flexReadBuffer.Buffer, 0, singleMessage.Content, 0, singleMessage.Length);
+                        yield return singleMessage;
+                        yield break; // If the message was "faulty" we might as well return it completely (as we do not know how to handle it)
+                    }
+                }
+            }
+        }
+
         /// <summary>
         /// Takes a log entry message (which may include multiple RPC-events)
         /// and splits this message into separate messages.
@@ -116,7 +216,7 @@ namespace Ambrosia
             }
         }
 
-        public static async Task<Event> ExtractEventAsync(Message message, long timestamp)
+        public static async Task<AmbrosiaEvent> ExtractEventAsync(long timestamp, Message message)
         {
             var _inputFlexBuffer = new FlexReadBuffer();
             await FlexReadBuffer.DeserializeAsync(new MemoryStream(message.Content), _inputFlexBuffer);
@@ -126,6 +226,7 @@ namespace Ambrosia
             if (firstByte != AmbrosiaRuntimeLBConstants.RPCByte)
             {
                 // No RPC -> No Event! (Dummy-Event to symbolize that there was an event but not a relevant one)
+                Console.WriteLine("No RPCByte detected... Returning dummy event");
                 return new AmbrosiaEvent(timestamp, EventType.Internal, -1);
             }
 
@@ -133,8 +234,9 @@ namespace Ambrosia
             var returnValueType = (ReturnValueTypes)_inputFlexBuffer.Buffer[_cursor++];
             if (returnValueType != ReturnValueTypes.None) // receiving a return value
             {
-                // No "real" RPC but only a response -> No Event!
-                return null;
+                // No "real" RPC but only a response -> No Event! (Dummy-Event to symbolize that there was an event but not a relevant one)
+                Console.WriteLine("Return value received... Returning dummy event");
+                return new AmbrosiaEvent(timestamp, EventType.Internal, -1);
             }
 
             var methodId = _inputFlexBuffer.Buffer.ReadBufferedInt(_cursor);
@@ -156,11 +258,20 @@ namespace Ambrosia
                 _cursor += LongSize(sequenceNumber);
             }
             
+            // FIXME: Really using _inputFlexBuffer.Buffer.Length? We read from message.Content and thus should use that length. Using _inputFlexBuffer might lead to empty bytes!?
             var lengthOfSerializedArguments = message.Content.Length - _cursor;
-            byte[] serializedMethods = new byte[lengthOfSerializedArguments];
-            Buffer.BlockCopy(_inputFlexBuffer.Buffer, _cursor, serializedMethods, 0, lengthOfSerializedArguments);
+            var altLengthOfSerializedArguments = _inputFlexBuffer.Buffer.Length - _cursor;
+            byte[] serializedMethodArgs = new byte[altLengthOfSerializedArguments];
+            /*Console.WriteLine($"BlockCopy[srcOffset: {_cursor}; count: {lengthOfSerializedArguments}; alt-count: {altLengthOfSerializedArguments}; srcLength: {_inputFlexBuffer.Buffer.Length}; dstLength: {serializedMethodArgs.Length}]");
+            if (lengthOfSerializedArguments != altLengthOfSerializedArguments)
+            {
+                Console.WriteLine("Mismatch");
+            }*/
+            Buffer.BlockCopy(_inputFlexBuffer.Buffer, _cursor, serializedMethodArgs, 0, altLengthOfSerializedArguments);
 
-            return new AmbrosiaEvent(timestamp, rpcType, methodId, serializedMethods);
+            var _event = new AmbrosiaEvent(timestamp, rpcType, methodId, serializedMethodArgs);
+            _event.AddAdditionalParam(EventConstants.ADDITIONAL_PARAM_RPC_TYPE, _rpcType);
+            return _event;
         }
     }
 }

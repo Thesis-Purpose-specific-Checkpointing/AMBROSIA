@@ -1157,6 +1157,7 @@ namespace Ambrosia
             long _maxBufSize;
             // Used in CAS. The first 31 bits are the #of writers, the next 32 bits is the buffer size, the last bit is the sealed bit
             long _status;
+            object _priorizedCheckpointRunLock = new object();
             const int SealedBits = 1;
             const int TailBits = 32;
             const int numWritesBits = 31;
@@ -1570,172 +1571,211 @@ namespace Ambrosia
                                            long newSeqNo,
                                            long newReplayableSeqNo,
                                            ConcurrentDictionary<string, OutputConnectionRecord> outputs,
-                                           InputConnectionRecord associatedInputConnectionRecord)
+                                           InputConnectionRecord associatedInputConnectionRecord,
+                                           Func<long, Task<bool>> finalCallback = null)
             {
                 var copyFromBuffer = copyFromFlexBuffer.Buffer;
                 var length = copyFromFlexBuffer.Length;
-                while (true)
+
+                lock (_priorizedCheckpointRunLock)
                 {
-                    bool sealing = false;
-                    long localStatus;
-                    localStatus = Interlocked.Read(ref _status);
-
-                    // Yield if the sealed bit is set
-                    while (localStatus % 2 == 1)
+                    while (true)
                     {
-                        await Task.Yield();
+                        bool sealing = false;
+                        long localStatus;
                         localStatus = Interlocked.Read(ref _status);
-                    }
-                    var oldBufLength = ((localStatus >> SealedBits) & Last32Mask);
-                    var newLength = oldBufLength + length;
 
-                    // Assemble the new status 
-                    long newLocalStatus;
-                    if ((newLength > _maxBufSize) || (_bufbak != null))
-                    {
-                        // We're going to try to seal the buffer
-                        newLocalStatus = localStatus + 1;
-                        sealing = true;
-                    }
-                    else
-                    {
-                        // We're going to try to add to the end of the existing buffer
-                        var newWrites = (localStatus >> (64 - numWritesBits)) + 1;
-                        newLocalStatus = ((newWrites) << (64 - numWritesBits)) | (newLength << SealedBits);
-                    }
-                    var origVal = Interlocked.CompareExchange(ref _status, newLocalStatus, localStatus);
-
-                    // Check if the compare and swap succeeded, otherwise try again
-                    if (origVal == localStatus)
-                    {
-                        // We are now preventing recovery until addrow finishes and all resulting commits have completed. We can safely update
-                        // LastProcessedID and LastProcessedReplayableID
-                        associatedInputConnectionRecord.LastProcessedID = newSeqNo;
-                        associatedInputConnectionRecord.LastProcessedReplayableID = newReplayableSeqNo;
-                        if (sealing)
+                        // Yield if the sealed bit is set
+                        while (localStatus % 2 == 1)
                         {
-                            // This call successfully sealed the buffer. Remember we still have an extra
-                            // message to take care of
+                            Task.Yield();
+                            localStatus = Interlocked.Read(ref _status);
+                        }
 
-                            // We have just filled the backup buffer and must wait until any other commit finishes
-                            int counter = 0;
-                            while (_bufbak == null)
+                        var oldBufLength = ((localStatus >> SealedBits) & Last32Mask);
+                        var newLength = oldBufLength + length;
+
+                        // Assemble the new status 
+                        long newLocalStatus;
+                        if ((newLength > _maxBufSize) || (_bufbak != null))
+                        {
+                            // We're going to try to seal the buffer
+                            newLocalStatus = localStatus + 1;
+                            sealing = true;
+                        }
+                        else
+                        {
+                            // We're going to try to add to the end of the existing buffer
+                            var newWrites = (localStatus >> (64 - numWritesBits)) + 1;
+                            newLocalStatus = ((newWrites) << (64 - numWritesBits)) | (newLength << SealedBits);
+                        }
+
+                        var origVal = Interlocked.CompareExchange(ref _status, newLocalStatus, localStatus);
+
+                        // Check if the compare and swap succeeded, otherwise try again
+                        if (origVal == localStatus)
+                        {
+                            // We are now preventing recovery until addrow finishes and all resulting commits have completed. We can safely update
+                            // LastProcessedID and LastProcessedReplayableID
+                            associatedInputConnectionRecord.LastProcessedID = newSeqNo;
+                            associatedInputConnectionRecord.LastProcessedReplayableID = newReplayableSeqNo;
+                            if (sealing)
                             {
-                                counter++;
-                                if (counter == 100000)
+                                // This call successfully sealed the buffer. Remember we still have an extra
+                                // message to take care of
+
+                                // We have just filled the backup buffer and must wait until any other commit finishes
+                                int counter = 0;
+                                while (_bufbak == null)
                                 {
-                                    counter = 0;
-                                    await Task.Yield();
+                                    counter++;
+                                    if (counter == 100000)
+                                    {
+                                        counter = 0;
+                                        Task.Yield();
+                                    }
                                 }
+
+                                // There is no other write going on. Take the backup buffer
+                                var newUncommittedWatermarks = _uncommittedWatermarksBak;
+                                var newWriteBuf = _bufbak;
+                                _bufbak = null;
+                                _uncommittedWatermarksBak = null;
+
+                                // Wait for other writes to complete before committing
+                                while (true)
+                                {
+                                    localStatus = Interlocked.Read(ref _status);
+                                    var numWrites = (localStatus >> (64 - numWritesBits));
+                                    if (numWrites == 0)
+                                    {
+                                        break;
+                                    }
+
+                                    Task.Yield();
+                                }
+
+                                // Filling header with enough info to detect incomplete writes and also writing the page length
+                                var writeStream = new MemoryStream(_buf, 4, 20);
+                                int lengthOnPage;
+                                if (newLength <= _maxBufSize)
+                                {
+                                    lengthOnPage = (int)newLength;
+                                }
+                                else
+                                {
+                                    lengthOnPage = (int)oldBufLength;
+                                }
+
+                                writeStream.WriteIntFixed(lengthOnPage);
+                                if (newLength <= _maxBufSize)
+                                {
+                                    // Copy the contents into the log record buffer
+                                    Buffer.BlockCopy(copyFromBuffer, 0, _buf, (int)oldBufLength, length);
+                                }
+
+                                long checkBytes;
+                                if (length <= (_maxBufSize - HeaderSize))
+                                {
+                                    // new message will end up in a commit buffer. Use normal CheckBytes
+                                    checkBytes = CheckBytes(HeaderSize, lengthOnPage - HeaderSize);
+                                }
+                                else
+                                {
+                                    // new message is too big to land in a commit buffer and will be tacked on the end.
+                                    checkBytes = CheckBytesExtra(HeaderSize, lengthOnPage - HeaderSize, copyFromBuffer,
+                                        length);
+                                }
+
+                                writeStream.WriteLongFixed(checkBytes);
+                                writeStream.WriteLongFixed(_nextWriteID);
+                                _nextWriteID++;
+
+                                // Do the actual commit
+                                // Grab the current state of trim levels since the last write
+                                // Note that the trim thread may want to modify the table, requiring a lock
+                                ConcurrentDictionary<string, long> oldTrimWatermarks;
+                                lock (_trimWatermarks)
+                                {
+                                    oldTrimWatermarks = _trimWatermarks;
+                                    _trimWatermarks = _trimWatermarksBak;
+                                    _trimWatermarksBak = null;
+                                }
+
+                                if (newLength <= _maxBufSize)
+                                {
+                                    // add row to current buffer and commit
+                                    _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
+                                    _lastCommitTask = Commit(_buf, (int)newLength, _uncommittedWatermarks,
+                                        oldTrimWatermarks, outputs);
+                                    newLocalStatus = HeaderSize << SealedBits;
+                                }
+                                else if (length > (_maxBufSize - HeaderSize))
+                                {
+                                    // Steal the byte array in the flex buffer to return it after writing
+                                    copyFromFlexBuffer.StealBuffer();
+                                    // write new event as part of commit
+                                    _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
+                                    var commitTask = Commit(_buf, (int)oldBufLength, copyFromBuffer, length,
+                                        _uncommittedWatermarks, oldTrimWatermarks, outputs);
+                                    newLocalStatus = HeaderSize << SealedBits;
+                                }
+                                else
+                                {
+                                    // commit and add new event to new buffer
+                                    newUncommittedWatermarks[outputToUpdate] =
+                                        new LongPair(newSeqNo, newReplayableSeqNo);
+                                    _lastCommitTask = Commit(_buf, (int)oldBufLength, _uncommittedWatermarks,
+                                        oldTrimWatermarks, outputs);
+                                    Buffer.BlockCopy(copyFromBuffer, 0, newWriteBuf, (int)HeaderSize, length);
+                                    newLocalStatus = (HeaderSize + length) << SealedBits;
+                                }
+
+                                // We still have the lock -> Execute exclusive function for, e.g., taking a checkpoint
+                                if (finalCallback != null)
+                                {
+                                    // Release lock and continue processing (only for sub-task
+                                    _buf = newWriteBuf;
+                                    _uncommittedWatermarks = newUncommittedWatermarks;
+                                    _status = newLocalStatus;
+
+                                    finalCallback((long)_logStream.FileSize).Wait();
+                                }
+
+                                // Release lock and continue processing
+                                _buf = newWriteBuf;
+                                _uncommittedWatermarks = newUncommittedWatermarks;
+                                _status = newLocalStatus;
+                                return (long)_logStream.FileSize;
                             }
 
-                            // There is no other write going on. Take the backup buffer
-                            var newUncommittedWatermarks = _uncommittedWatermarksBak;
-                            var newWriteBuf = _bufbak;
-                            _bufbak = null;
-                            _uncommittedWatermarksBak = null;
-
-                            // Wait for other writes to complete before committing
+                            // Add the message to the existing buffer
+                            Buffer.BlockCopy(copyFromBuffer, 0, _buf, (int)oldBufLength, length);
+                            _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
+                            // Reduce write count
                             while (true)
                             {
                                 localStatus = Interlocked.Read(ref _status);
-                                var numWrites = (localStatus >> (64 - numWritesBits));
-                                if (numWrites == 0)
+                                var newWrites = (localStatus >> (64 - numWritesBits)) - 1;
+                                newLocalStatus = (localStatus & ((Last32Mask << 1) + 1)) |
+                                                 (newWrites << (64 - numWritesBits));
+                                origVal = Interlocked.CompareExchange(ref _status, newLocalStatus, localStatus);
+                                if (origVal == localStatus)
                                 {
-                                    break;
-                                }
-                                await Task.Yield();
-                            }
+                                    if (localStatus % 2 == 0 && _bufbak != null)
+                                    {
+                                        TryCommitAsync(outputs).Wait();
+                                    }
 
-                            // Filling header with enough info to detect incomplete writes and also writing the page length
-                            var writeStream = new MemoryStream(_buf, 4, 20);
-                            int lengthOnPage;
-                            if (newLength <= _maxBufSize)
-                            {
-                                lengthOnPage = (int)newLength;
-                            }
-                            else
-                            {
-                                lengthOnPage = (int)oldBufLength;
-                            }
-                            writeStream.WriteIntFixed(lengthOnPage);
-                            if (newLength <= _maxBufSize)
-                            {
-                                // Copy the contents into the log record buffer
-                                Buffer.BlockCopy(copyFromBuffer, 0, _buf, (int)oldBufLength, length);
-                            }
-                            long checkBytes;
-                            if (length <= (_maxBufSize - HeaderSize))
-                            {
-                                // new message will end up in a commit buffer. Use normal CheckBytes
-                                checkBytes = CheckBytes(HeaderSize, lengthOnPage - HeaderSize);
-                            }
-                            else
-                            {
-                                // new message is too big to land in a commit buffer and will be tacked on the end.
-                                checkBytes = CheckBytesExtra(HeaderSize, lengthOnPage - HeaderSize, copyFromBuffer, length);
-                            }
-                            writeStream.WriteLongFixed(checkBytes);
-                            writeStream.WriteLongFixed(_nextWriteID);
-                            _nextWriteID++;
+                                    // We still have the lock -> Execute exclusive function for, e.g., taking a checkpoint
+                                    if (finalCallback != null)
+                                    {
+                                        // Release lock and continue processing (only for sub-task)
+                                        finalCallback((long)_logStream.FileSize).Wait();
+                                    }
 
-                            // Do the actual commit
-                            // Grab the current state of trim levels since the last write
-                            // Note that the trim thread may want to modify the table, requiring a lock
-                            ConcurrentDictionary<string, long> oldTrimWatermarks;
-                            lock (_trimWatermarks)
-                            {
-                                oldTrimWatermarks = _trimWatermarks;
-                                _trimWatermarks = _trimWatermarksBak;
-                                _trimWatermarksBak = null;
-                            }
-                            if (newLength <= _maxBufSize)
-                            {
-                                // add row to current buffer and commit
-                                _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
-                                _lastCommitTask = Commit(_buf, (int)newLength, _uncommittedWatermarks, oldTrimWatermarks, outputs);
-                                newLocalStatus = HeaderSize << SealedBits;
-                            }
-                            else if (length > (_maxBufSize - HeaderSize))
-                            {
-                                // Steal the byte array in the flex buffer to return it after writing
-                                copyFromFlexBuffer.StealBuffer();
-                                // write new event as part of commit
-                                _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
-                                var commitTask = Commit(_buf, (int)oldBufLength, copyFromBuffer, length, _uncommittedWatermarks, oldTrimWatermarks, outputs);
-                                newLocalStatus = HeaderSize << SealedBits;
-                            }
-                            else
-                            {
-                                // commit and add new event to new buffer
-                                newUncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
-                                _lastCommitTask = Commit(_buf, (int)oldBufLength, _uncommittedWatermarks, oldTrimWatermarks, outputs);
-                                Buffer.BlockCopy(copyFromBuffer, 0, newWriteBuf, (int)HeaderSize, length);
-                                newLocalStatus = (HeaderSize + length) << SealedBits;
-                            }
-                            _buf = newWriteBuf;
-                            _uncommittedWatermarks = newUncommittedWatermarks;
-                            _status = newLocalStatus;
-                            return (long)_logStream.FileSize;
-                        }
-                        // Add the message to the existing buffer
-                        Buffer.BlockCopy(copyFromBuffer, 0, _buf, (int)oldBufLength, length);
-                        _uncommittedWatermarks[outputToUpdate] = new LongPair(newSeqNo, newReplayableSeqNo);
-                        // Reduce write count
-                        while (true)
-                        {
-                            localStatus = Interlocked.Read(ref _status);
-                            var newWrites = (localStatus >> (64 - numWritesBits)) - 1;
-                            newLocalStatus = (localStatus & ((Last32Mask << 1) + 1)) |
-                                          (newWrites << (64 - numWritesBits));
-                            origVal = Interlocked.CompareExchange(ref _status, newLocalStatus, localStatus);
-                            if (origVal == localStatus)
-                            {
-                                if (localStatus % 2 == 0 && _bufbak != null)
-                                {
-                                    await TryCommitAsync(outputs);
+                                    return (long)_logStream.FileSize;
                                 }
-                                return (long)_logStream.FileSize;
                             }
                         }
                     }
@@ -3452,7 +3492,7 @@ namespace Ambrosia
 
                 default:
                     // This one really should terminate the process; no recovery allowed.
-                    OnError(0, "Illegal leading byte in local message");
+                    OnError(0, $"Illegal leading byte ({messageType}) in local message");
                     break;
             }
         }
@@ -3953,74 +3993,103 @@ namespace Ambrosia
                                                     FlexReadBuffer inputFlexBuffer)
         {
             var sizeBytes = inputFlexBuffer.LengthLength;
+
+            MachineState state;
+            AmbrosiaMessage message;
             switch (inputFlexBuffer.Buffer[sizeBytes])
             {
                 case RPCByte:
                     var methodID = inputFlexBuffer.Buffer.ReadBufferedInt(sizeBytes + 2);
                     long newFileSize;
+                    
+                    // Load message information
+                    message = new AmbrosiaMessage();
+                    message.Length = inputFlexBuffer.Buffer.Length;
+                    message.Content = new byte[message.Length];
+                    Buffer.BlockCopy(inputFlexBuffer.Buffer, 0, message.Content, 0, message.Length);
+                    
+                    Func<long, Task<bool>> checkpointCallback = async (logFileSize) => {
+                        // Load state information
+                        state = new MachineState(_shardID);
+                        LoadAmbrosiaState(state);
+
+                        _totalProcessedEvents++;
+
+                        await TakeCheckpointIfNecessaryAsync(state, message, new Dictionary<string, object>
+                        {
+                            { EventConstants.ADDITIONAL_PARAM_FILE_SIZE, logFileSize }
+                        });
+                        
+                        return true;
+                    };
+                    
                     if (inputFlexBuffer.Buffer[sizeBytes + 2 + StreamCommunicator.IntSize(methodID)] != (byte)RpcTypes.RpcType.Impulse)
                     {
-                        newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID + 1, _outputs, inputRecord);
+                        newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID + 1, _outputs, inputRecord, checkpointCallback);
                     }
                     else
                     {
-                        newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID, _outputs, inputRecord);
+                        newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID, _outputs, inputRecord, checkpointCallback);
                     }
+                    
                     inputFlexBuffer.ResetBuffer();
-                    if (_newLogTriggerSize > 0 && newFileSize >= _newLogTriggerSize)
-                    {
-                        // Make sure only one input thread is moving to the next log file. Won't break the system if we don't do this, but could result in
-                        // empty log files
-                        if (Interlocked.CompareExchange(ref _movingToNextLog, 1, 0) == 0)
-                        {
-                            await MoveServiceToNextLogFileAsync();
-                            _movingToNextLog = 0;
-                        }
-                    }
-                    break;
-
-                case CountReplayableRPCBatchByte:
-                    var restOfBatchOffset = inputFlexBuffer.LengthLength + 1;
-                    var memStream = new MemoryStream(inputFlexBuffer.Buffer, restOfBatchOffset, inputFlexBuffer.Length - restOfBatchOffset);
-                    var numRPCs = memStream.ReadInt();
-                    var numReplayableRPCs = memStream.ReadInt();
-                    newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + numRPCs, inputRecord.LastProcessedReplayableID + numReplayableRPCs, _outputs, inputRecord);
-                    inputFlexBuffer.ResetBuffer();
-                    memStream.Dispose();
-                    if (_newLogTriggerSize > 0 && newFileSize >= _newLogTriggerSize)
-                    {
-                        // Make sure only one input thread is moving to the next log file. Won't break the system if we don't do this, but could result in
-                        // empty log files
-                        if (Interlocked.CompareExchange(ref _movingToNextLog, 1, 0) == 0)
-                        {
-                            await MoveServiceToNextLogFileAsync();
-                            _movingToNextLog = 0;
-                        }
-                    }
                     break;
 
                 case RPCBatchByte:
-                    restOfBatchOffset = inputFlexBuffer.LengthLength + 1;
-                    memStream = new MemoryStream(inputFlexBuffer.Buffer, restOfBatchOffset, inputFlexBuffer.Length - restOfBatchOffset);
-                    numRPCs = memStream.ReadInt();
-                    newFileSize = await _committer.AddRow(inputFlexBuffer, inputName, inputRecord.LastProcessedID + numRPCs, inputRecord.LastProcessedReplayableID + numRPCs, _outputs, inputRecord);
-                    inputFlexBuffer.ResetBuffer();
-                    memStream.Dispose();
-                    if (_newLogTriggerSize > 0 && newFileSize >= _newLogTriggerSize)
-                    {
-                        // Make sure only one input thread is moving to the next log file. Won't break the system if we don't do this, but could result in
-                        // empty log files
-                        if (Interlocked.CompareExchange(ref _movingToNextLog, 1, 0) == 0)
+                case CountReplayableRPCBatchByte:
+                    var restOfBatchOffset = inputFlexBuffer.LengthLength + 1;
+                    // Load state information
+                    state = new MachineState(_shardID);
+                    LoadAmbrosiaState(state);
+                    
+                    // Load message information
+                    message = new AmbrosiaMessage();
+                    message.Length = inputFlexBuffer.Buffer.Length;
+                    message.Content = new byte[message.Length];
+                    Buffer.BlockCopy(inputFlexBuffer.Buffer, 0, message.Content, 0, message.Length);
+
+                    Func<AmbrosiaEvent, Func<long, Task<bool>>> checkpointCallbackFactory = (_event) => async (logFileSize) => {
+                        LoadAmbrosiaState(state);
+                        
+                        _totalProcessedEvents++;
+                        
+                        // Check whether to checkpoint or not
+                        await TakeCheckpointIfNecessaryAsync(state, _event, new Dictionary<string, object>
                         {
-                            await MoveServiceToNextLogFileAsync();
-                            _movingToNextLog = 0;
+                            { EventConstants.ADDITIONAL_PARAM_FILE_SIZE, logFileSize }
+                        });
+                        
+                        return false;
+                    };
+                    
+                    // Execute RPCs sequentially to enable "intelligent" checkpointing
+                    FlexReadBuffer messageBuffer = new FlexReadBuffer();
+                    await foreach (var _message in LogEntryHelper.SplitLogEntryMessage(inputFlexBuffer))
+                    {
+                        var _event = await LogEntryHelper.ExtractEventAsync(state.TotalProcessedEvents, _message);
+
+                        object _rpcType;
+                        var hasRpcType = _event.AdditionalParams.TryGetValue(EventConstants.ADDITIONAL_PARAM_RPC_TYPE, out _rpcType);
+
+                        // Execute single event
+                        await FlexReadBuffer.DeserializeAsync(new MemoryStream(_message.Content), messageBuffer);
+                        if (hasRpcType && (RpcTypes.RpcType) _rpcType != RpcTypes.RpcType.Impulse)
+                        {
+                            newFileSize = await _committer.AddRow(messageBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID + 1, _outputs, inputRecord, checkpointCallbackFactory(_event));
                         }
+                        else
+                        {
+                            newFileSize = await _committer.AddRow(messageBuffer, inputName, inputRecord.LastProcessedID + 1, inputRecord.LastProcessedReplayableID, _outputs, inputRecord, checkpointCallbackFactory(_event));
+                        }
+                        messageBuffer.ResetBuffer();
                     }
+                    
+                    inputFlexBuffer.ResetBuffer();
                     break;
 
                 case PingByte:
                     // Write time into correct place in message
-                    memStream = new MemoryStream(inputFlexBuffer.Buffer, inputFlexBuffer.Length - 4 * sizeof(long), sizeof(long));
+                    var memStream = new MemoryStream(inputFlexBuffer.Buffer, inputFlexBuffer.Length - 4 * sizeof(long), sizeof(long));
                     long time;
                     GetSystemTimePreciseAsFileTime(out time);
                     memStream.WriteLongFixed(time);
@@ -4519,8 +4588,9 @@ namespace Ambrosia
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
-            // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, new CSharpProjectUtil());
-            _checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
+            // _checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
+            //_checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
+            _checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 8 * 1024);
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif
