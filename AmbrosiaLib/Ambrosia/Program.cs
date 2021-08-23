@@ -4003,7 +4003,7 @@ namespace Ambrosia
                     
                     // Load message information
                     message = new AmbrosiaMessage();
-                    message.Length = inputFlexBuffer.Buffer.Length;
+                    message.Length = inputFlexBuffer.Length;
                     message.Content = new byte[message.Length];
                     Buffer.BlockCopy(inputFlexBuffer.Buffer, 0, message.Content, 0, message.Length);
                     
@@ -4043,7 +4043,7 @@ namespace Ambrosia
                     
                     // Load message information
                     message = new AmbrosiaMessage();
-                    message.Length = inputFlexBuffer.Buffer.Length;
+                    message.Length = inputFlexBuffer.Length;
                     message.Content = new byte[message.Length];
                     Buffer.BlockCopy(inputFlexBuffer.Buffer, 0, message.Content, 0, message.Length);
 

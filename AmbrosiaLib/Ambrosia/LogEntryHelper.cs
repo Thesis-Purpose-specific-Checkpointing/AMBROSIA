@@ -258,16 +258,14 @@ namespace Ambrosia
                 _cursor += LongSize(sequenceNumber);
             }
             
-            // FIXME: Really using _inputFlexBuffer.Buffer.Length? We read from message.Content and thus should use that length. Using _inputFlexBuffer might lead to empty bytes!?
             var lengthOfSerializedArguments = message.Content.Length - _cursor;
-            var altLengthOfSerializedArguments = _inputFlexBuffer.Buffer.Length - _cursor;
-            byte[] serializedMethodArgs = new byte[altLengthOfSerializedArguments];
+            byte[] serializedMethodArgs = new byte[lengthOfSerializedArguments];
             /*Console.WriteLine($"BlockCopy[srcOffset: {_cursor}; count: {lengthOfSerializedArguments}; alt-count: {altLengthOfSerializedArguments}; srcLength: {_inputFlexBuffer.Buffer.Length}; dstLength: {serializedMethodArgs.Length}]");
             if (lengthOfSerializedArguments != altLengthOfSerializedArguments)
             {
                 Console.WriteLine("Mismatch");
             }*/
-            Buffer.BlockCopy(_inputFlexBuffer.Buffer, _cursor, serializedMethodArgs, 0, altLengthOfSerializedArguments);
+            Buffer.BlockCopy(message.Content, _cursor, serializedMethodArgs, 0, lengthOfSerializedArguments);
 
             var _event = new AmbrosiaEvent(timestamp, rpcType, methodId, serializedMethodArgs);
             _event.AddAdditionalParam(EventConstants.ADDITIONAL_PARAM_RPC_TYPE, _rpcType);
