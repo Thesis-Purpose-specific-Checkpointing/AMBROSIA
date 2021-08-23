@@ -2442,23 +2442,22 @@ namespace Ambrosia
                 FlexReadBuffer.Deserialize(checkpointStream, serviceCheckpoint);
                 state.Committer.SendCheckpointToRecoverFrom(serviceCheckpoint.Buffer, serviceCheckpoint.Length, checkpointStream);
                 // Deserialize other helpful information about the current processing within the log file
-                if (state.LastCommittedSubCheckpoint > 0)
+                try
                 {
-                    try
-                    {
-                        state.LastProcessedMessage = checkpointStream.ReadLongFixed();
-                        state.LastLogFileOffset = checkpointStream.ReadLongFixed();
-                        state.TotalProcessedEvents = checkpointStream.ReadLongFixed();
-                    }
-                    catch (Exception e)
-                    {
-                        // It is expected that this method may fail if a checkpoint was created prior to the additional information added
-                        // -> To prevent breaking older checkpoints: just ignore issues with reading these information
-                        // -> If only a subset of the information could be read, still use this information and skip any unread variable
-                        state.LastProcessedMessage = state.LastProcessedMessage > 0 ? state.LastProcessedMessage : 0;
-                        state.LastLogFileOffset = state.LastLogFileOffset > 0 ? state.LastLogFileOffset : 0;
-                        state.TotalProcessedEvents = state.TotalProcessedEvents > 0 ? state.TotalProcessedEvents : 0;
-                    }
+                    // LastProcessedMessage and LastLogFileOffset might be 0 for normal execution but for sub-checkpoints it might actually be filled
+                    state.LastProcessedMessage = checkpointStream.ReadLongFixed();
+                    state.LastLogFileOffset = checkpointStream.ReadLongFixed();
+                    // TotalProcessedEvents might be filled for normal execution and re-processing
+                    state.TotalProcessedEvents = checkpointStream.ReadLongFixed();
+                }
+                catch (Exception e)
+                {
+                    // It is expected that this method may fail if a checkpoint was created prior to the additional information added
+                    // -> To prevent breaking older checkpoints: just ignore issues with reading these information
+                    // -> If only a subset of the information could be read, still use this information and skip any unread variable
+                    state.LastProcessedMessage = state.LastProcessedMessage > 0 ? state.LastProcessedMessage : 0;
+                    state.LastLogFileOffset = state.LastLogFileOffset > 0 ? state.LastLogFileOffset : 0;
+                    state.TotalProcessedEvents = state.TotalProcessedEvents > 0 ? state.TotalProcessedEvents : 0;
                 }
             }
 
