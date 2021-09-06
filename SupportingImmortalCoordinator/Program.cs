@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -34,6 +35,9 @@ namespace SupportingImmortalCoordinator
         private static int _currentVersion;
         private static bool _isTestingUpgrade;
         
+        // Checkpointing Strategy params
+        private static Dictionary<string, object> additionalCheckpointingParams = new Dictionary<string, object>();
+        
         public static void main(string[] args)
         {
             var firstArg = args[0];
@@ -46,7 +50,7 @@ namespace SupportingImmortalCoordinator
                 var myRuntime = new AmbrosiaRuntime();
                 myRuntime.InitializeRepro(_instanceName, StartupParamOverrides.ICLogLocation, _checkpointToLoad, _currentVersion,
                     _isTestingUpgrade, _subCheckpointToLoad, StartupParamOverrides.receivePort, StartupParamOverrides.sendPort,
-                    StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation);
+                    StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation, additionalCheckpointingParams);
                 return;
             }
             
@@ -185,7 +189,17 @@ namespace SupportingImmortalCoordinator
 
             try
             {
-                options.Parse(args);
+                var extra = options.Parse(args);
+                foreach (var extraArgument in extra)
+                {
+                    var positionAfterMinus = extraArgument.LastIndexOf("--") + 2;
+                    var positionOfEqual = extraArgument.IndexOf('=');
+
+                    var name = extraArgument.Substring(positionAfterMinus, positionOfEqual - positionAfterMinus);
+                    var value = extraArgument.Substring(positionOfEqual + 1);
+                    
+                    additionalCheckpointingParams.Add(name, value);
+                }
             }
             catch (OptionException e)
             {
