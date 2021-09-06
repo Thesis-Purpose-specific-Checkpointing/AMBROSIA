@@ -2172,8 +2172,6 @@ namespace Ambrosia
 
         internal enum AARole { Primary, Secondary, Checkpointer };
         AARole _myRole;
-        // Log size at which we start a new log file. This triggers a checkpoint, <= 0 if manual only checkpointing is done
-        long _newLogTriggerSize;
         // The numeric suffix of the log file currently being read or written to
         long _lastLogFile;
         // The offset of the current message within the log
@@ -3284,6 +3282,13 @@ namespace Ambrosia
         
         internal async Task<bool> TakeSubCheckpointIfNecessaryAsync(MachineState state, Message message)
         {
+            if (!_runningRepro)
+            {
+                // We don't want to take a checkpoint if the IC is not running a repro.
+                // This way we skip unnecessary checkpoints on recovery after a failure.
+                return false;
+            }
+
             var shouldTakeCheckpoint = await ShouldTakeCheckpointAsync(state, message);
 
             if (shouldTakeCheckpoint)
@@ -4494,14 +4499,6 @@ namespace Ambrosia
             }
             _persistLogs = persistLogs;
             _activeActive = activeActive;
-            if (StartupParamOverrides.LogTriggerSizeMB != -1)
-            {
-                _newLogTriggerSize = StartupParamOverrides.LogTriggerSizeMB * 1048576;
-            }
-            else
-            {
-                _newLogTriggerSize = logTriggerSizeMB * 1048576;
-            }
             if (StartupParamOverrides.ICLogLocation == null)
             {
                 _serviceLogPath = serviceLogPath;
