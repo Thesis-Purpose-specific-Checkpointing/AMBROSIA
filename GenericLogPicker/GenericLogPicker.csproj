@@ -5,6 +5,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>../Ambrosia/Ambrosia.snk</AssemblyOriginatorKeyFile>
+    <Configurations>Debug;Release;Measure</Configurations>
+    <Platforms>AnyCPU</Platforms>
   </PropertyGroup>
   <PropertyGroup Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(TargetFramework)', '^netstandard\d'))">
     <DefineConstants>$(DefineConstants);NETSTANDARD</DefineConstants>

@@ -3247,19 +3247,44 @@ namespace Ambrosia
                     Trace.TraceWarning("No checkpointing strategy initialized. IC will not take any (sub-)checkpoints.");
                     return false;
                 case StaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
+#if MEASURE
+                    var staticStrategyStopwatch = Stopwatch.StartNew();
+
+                    @event.AddAdditionalParams(additionalParams);
+                    var staticResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, @event);
+
+                    staticStrategyStopwatch.Stop();
+                    Console.WriteLine($"Stopwatch (StaticStrategy): {staticStrategyStopwatch.ElapsedMilliseconds}ms");
+                    
+                    return staticResult;
+#else
                     @event.AddAdditionalParams(additionalParams);
                     
                     return await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, @event);
+#endif
                 case DynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent> strategy:
                     // How To:
                     // 1. TakeSubCheckpointAsync
                     // 2. Create State with checkpoint-stream
                     // 3. Run strategy
                     // 4. Remove or keep the corresponding checkpoint
+#if MEASURE
+                    var dynamicStrategyStopwatch = Stopwatch.StartNew();
+                    var _state = await GetComponentStateAsync();
+                    @event.AddAdditionalParams(additionalParams);
+                    
+                    var dynamicResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, @event);
+                    
+                    dynamicStrategyStopwatch.Stop();
+                    Console.WriteLine($"Stopwatch (DynamicStrategy): {dynamicStrategyStopwatch.ElapsedMilliseconds}ms");
+
+                    return dynamicResult;
+#else
                     var _state = await GetComponentStateAsync();
                     @event.AddAdditionalParams(additionalParams);
                     
                     return await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, @event);
+#endif
                 default:
                     return false;
             }

@@ -8,7 +8,8 @@
     <RootNamespace>Ambrosia</RootNamespace>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>../Ambrosia.snk</AssemblyOriginatorKeyFile>
-    <Platforms>x64;ARM64</Platforms>
+    <Platforms>x64;ARM64;AnyCPU</Platforms>
+    <Configurations>Debug;Release;Measure</Configurations>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|ARM64'">
