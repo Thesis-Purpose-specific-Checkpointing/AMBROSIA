@@ -37,6 +37,7 @@ namespace SupportingImmortalCoordinator
         
         // Checkpointing Strategy params
         private static Dictionary<string, object> additionalCheckpointingParams = new Dictionary<string, object>();
+        private static string _pluginPath = "";
         
         public static void main(string[] args)
         {
@@ -50,7 +51,7 @@ namespace SupportingImmortalCoordinator
                 var myRuntime = new AmbrosiaRuntime();
                 myRuntime.InitializeRepro(_instanceName, StartupParamOverrides.ICLogLocation, _checkpointToLoad, _currentVersion,
                     _isTestingUpgrade, _subCheckpointToLoad, StartupParamOverrides.receivePort, StartupParamOverrides.sendPort,
-                    StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation, additionalCheckpointingParams);
+                    StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation, _pluginPath, additionalCheckpointingParams);
                 return;
             }
             
@@ -185,6 +186,9 @@ namespace SupportingImmortalCoordinator
                 { "tu|testingUpgrade", "Is testing upgrade.", u => _isTestingUpgrade = true },
                 { "cpp|checkpointPath=", "The service checkpoint path override.", cpp => StartupParamOverrides.ICCheckpointLocation = cpp },
                 { "pp|projectPath=", "The service project path override.", pp => StartupParamOverrides.ICProjectLocation = pp },
+                
+                // Strategy params
+                { "plugp|pluginPath=", "The path to an additional folder, which includes further dlls that should be loaded dynamically.", plugp => _pluginPath = plugp },
             };
 
             try

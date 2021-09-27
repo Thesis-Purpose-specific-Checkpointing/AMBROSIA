@@ -19,5 +19,11 @@
         <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="3.9.0-2.final" />
         <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="3.9.0-2.final" />
     </ItemGroup>
+    
+    <ItemGroup>
+        <ProjectReference Include="../../TimeTravelDebuggingStudienprojekt/AnalyticsInvariants/AnalyticsInvariants.csproj">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </ProjectReference>
+    </ItemGroup>
 
 </Project>

@@ -4503,6 +4503,7 @@ namespace Ambrosia
                        bool sharded,
                        string serviceCheckpointPath = "",
                        string serviceProjectPath = "",
+                       string servicePluginPath = "",
                        Dictionary<string, object> additionalStrategyParams = null
                        )
         {
@@ -4573,7 +4574,7 @@ namespace Ambrosia
             AddAsyncOutputEndpoint(AmbrosiaControlOutputsName, new AmbrosiaOutput(this, "control"));
             _createService = createService.Value;
             
-            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath, additionalStrategyParams);
+            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath, servicePluginPath, additionalStrategyParams);
             try
             {
                 RecoverOrStartAsync().Wait();
@@ -4594,6 +4595,7 @@ namespace Ambrosia
                                     int serviceSendToPort = 0,
                                     string serviceCheckpointPath = "",
                                     string serviceProjectPath = "",
+                                    string servicePluginPath = "",
                                     Dictionary<string, object> additionalStrategyParams = null)
         {
             _localServiceReceiveFromPort = serviceReceiveFromPort;
@@ -4607,7 +4609,7 @@ namespace Ambrosia
             _sharded = false;
             _createService = false;
             
-            InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath, additionalStrategyParams);
+            InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath, servicePluginPath, additionalStrategyParams);
             
             InitializeLogWriterStatics();
             try
@@ -4620,10 +4622,15 @@ namespace Ambrosia
             }
         }
         
-        private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath, Dictionary<string, object> additionalArgs) {
+        private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath, string pluginPath = "", Dictionary<string, object> additionalArgs = null) {
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
+            if (additionalArgs == null)
+            {
+                additionalArgs = new Dictionary<string, object>();
+            }
+
             // -- Dummy Checkpointing Strategies --
             //_checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
             //_checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
@@ -4633,14 +4640,17 @@ namespace Ambrosia
             //_checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 8 * 1024);
             // -- --
             
-            // -- Invariant Checkpointing Strategy --
+            // -- (Location Concerning) Invariant Checkpointing Strategy --
             bool trainPhase;
-            int threshold;
+            float threshold;
             additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
             trainPhase = bool.Parse(_trainPhase.ToString());
             additionalArgs.TryGetValue("Threshold", out var _threshold);
-            threshold = int.Parse(_threshold.ToString());
-            _checkpointingStrategy = new UnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase, threshold);
+            threshold = float.Parse(_threshold.ToString());
+            // _checkpointingStrategy = new UnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationAndEffectiveChangesStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
             // -- --
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
