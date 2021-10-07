@@ -1,5 +1,8 @@
-﻿namespace Ambrosia
+﻿using System;
+
+namespace Ambrosia
 {    
+    [Serializable]
     public struct LongPair
     {
         public LongPair(long first,

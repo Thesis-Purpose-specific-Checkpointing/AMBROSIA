@@ -20,8 +20,10 @@ using System.Xml.Serialization;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using DebuggingSupport;
+using DebuggingSupport.provenance;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace Ambrosia
 {
@@ -4233,7 +4235,7 @@ namespace Ambrosia
 
             try
             {
-                return JsonConvert.DeserializeObject<State>(_state);
+                return JsonConvert.DeserializeObject<AmbrosiaState>(_state);
             }
             catch (Exception e)
             {
@@ -4641,7 +4643,7 @@ namespace Ambrosia
             // -- --
             
             // -- (Location Concerning) Invariant Checkpointing Strategy --
-            bool trainPhase;
+            /*bool trainPhase;
             float threshold;
             additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
             trainPhase = bool.Parse(_trainPhase.ToString());
@@ -4651,6 +4653,19 @@ namespace Ambrosia
             _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
             // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
             // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationAndEffectiveChangesStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // -- -- */
+            
+            // -- Provenance Supported Strategies --
+            string previousMethodInformationFilePath;
+            additionalArgs.TryGetValue("previousMethods", out var _previousMethodInformationFilePath);
+            previousMethodInformationFilePath = _previousMethodInformationFilePath.ToString();
+            bool trainPhase;
+            additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
+            trainPhase = bool.Parse(_trainPhase.ToString());
+            // _checkpointingStrategy = new DuplicateWriteAccessStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance());
+            // _checkpointingStrategy = new WhyDiffStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), previousMethodInformationFilePath);
+            // previousMethodInformationFilePath = null;
+            _checkpointingStrategy = new WhyDiffDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase);
             // -- --
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
