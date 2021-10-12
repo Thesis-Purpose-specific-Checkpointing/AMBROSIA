@@ -1,0 +1,64 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <OutputType>Library</OutputType>
+        <TargetFrameworks>net472;netstandard2.0</TargetFrameworks>
+        <Configurations>Debug;Release;Measure</Configurations>
+        <Platforms>AnyCPU</Platforms>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+      <OutputPath>bin\Debug\</OutputPath>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+      <OutputPath>bin\Release\</OutputPath>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Measure|AnyCPU' ">
+      <OutputPath>bin\Measure\</OutputPath>
+    </PropertyGroup>
+    
+    <ItemGroup>
+        <Reference Include="System" />
+        <Reference Include="System.Core" />
+        <Reference Include="System.Data" />
+        <Reference Include="System.Xml" />
+        <Reference Include="nunit.framework, Version=3.5.0.0, Culture=neutral, PublicKeyToken=2638cd05610744eb">
+            <HintPath>..\packages\NUnit.3.5.0\lib\net45\nunit.framework.dll</HintPath>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <Compile Include="Tests.cs" />
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\AmbrosiaLib\Ambrosia\AmbrosiaLib.csproj" />
+        <ProjectReference Include="..\AzureBlobsLogPicker\AzureBlobsLogPicker.csproj" />
+        <ProjectReference Include="..\GenericLogPicker\GenericLogPicker.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.CRA" Version="2020.9.24.1" />
+        <PackageReference Include="Microsoft.Build.Locator" Version="1.2.2" />
+        <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="3.9.0-2.final" />
+        <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="3.9.0-2.final" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../../TimeTravelDebuggingStudienprojekt/AnalyticsInvariants/AnalyticsInvariants.csproj">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </ProjectReference>
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Include="App.config" />
+    </ItemGroup>
+    <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+    <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
+         Other similar extension points exist, see Microsoft.Common.targets.
+    <Target Name="BeforeBuild">
+    </Target>
+    <Target Name="AfterBuild">
+    </Target>
+    -->
+
+</Project>

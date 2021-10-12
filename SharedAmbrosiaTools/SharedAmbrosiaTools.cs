@@ -190,6 +190,17 @@ namespace Ambrosia
         // Returns the current contents of the buffer
         public byte[] Buffer { get { return _buffer; } }
 
+        public byte[] FullBuffer
+        {
+            get
+            {
+                byte[] bytes = new byte[_sizeBuf.Length + _buffer.Length];
+                System.Buffer.BlockCopy(_sizeBuf, 0, bytes, 0, _sizeBuf.Length);
+                System.Buffer.BlockCopy(_buffer, 0, bytes, _sizeBuf.Length, _buffer.Length);
+                return bytes;
+            }
+        }
+
         // Returns the number of bytes copied in the last deserialize call
         public int Length { get { return _curSize; } }
 

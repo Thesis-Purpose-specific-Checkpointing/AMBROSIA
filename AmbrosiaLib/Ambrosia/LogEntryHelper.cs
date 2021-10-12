@@ -245,7 +245,7 @@ namespace Ambrosia
             var rpcType = _rpcType is RpcTypes.RpcType.ReturnValue ? EventType.External :
                 _rpcType is RpcTypes.RpcType.FireAndForget ? EventType.External :
                 _rpcType is RpcTypes.RpcType.Impulse ? EventType.Internal :
-                throw new ArgumentOutOfRangeException();
+                throw new ArgumentOutOfRangeException($"RPCType is {_rpcType}.");
 
             if (!_rpcType.IsFireAndForget())
             {

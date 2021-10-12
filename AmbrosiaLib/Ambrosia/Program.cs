@@ -22,6 +22,8 @@ using System.Runtime.InteropServices;
 using DebuggingSupport;
 using DebuggingSupport.provenance;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.QualityTools.Testing.Fakes;
+using Microsoft.WindowsAzure.Storage.Table.Fakes;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -1165,7 +1167,7 @@ namespace Ambrosia
             const int numWritesBits = 31;
             const long Last32Mask = 0x00000000FFFFFFFF;
             const long First32Mask = Last32Mask << 32;
-            ILogWriter _logStream;
+            internal ILogWriter _logStream;
             Stream _workStream;
             ConcurrentDictionary<string, LongPair> _uncommittedWatermarks;
             ConcurrentDictionary<string, LongPair> _uncommittedWatermarksBak;
@@ -1741,7 +1743,13 @@ namespace Ambrosia
                                     _uncommittedWatermarks = newUncommittedWatermarks;
                                     _status = newLocalStatus;
 
-                                    finalCallback((long)_logStream.FileSize).Wait();
+                                    try {
+                                        finalCallback((long)_logStream.FileSize).Wait();
+                                    }
+                                    catch
+                                    {
+                                        Debugger.Break();
+                                    }
                                 }
 
                                 // Release lock and continue processing
@@ -3954,6 +3962,7 @@ namespace Ambrosia
             await inputTask;
         }
 
+        uint partCount = 0;
 
         private async Task InputDataListenerAsync(InputConnectionRecord inputRecord,
                                                   string inputName,
@@ -3966,6 +3975,15 @@ namespace Ambrosia
             while (true)
             {
                 await FlexReadBuffer.DeserializeAsync(inputRecord.DataConnectionStream, inputFlexBuffer, ct);
+
+                var buffer = inputFlexBuffer.FullBuffer;
+                
+                FileStream stream = new FileStream($@"C:\Logs\Dummy\{partCount}", FileMode.Create);
+                stream.Write(buffer, 0, buffer.Length);
+                partCount++;
+                stream.Flush();
+                stream.Close();
+
                 await ProcessInputMessageAsync(inputRecord, inputName, inputFlexBuffer);
             }
         }
@@ -4429,23 +4447,43 @@ namespace Ambrosia
 
             bool sharded = false;
 
-            Initialize(
-                p.serviceReceiveFromPort,
-                p.serviceSendToPort,
-                p.serviceName,
-                p.serviceLogPath,
-                p.createService,
-                p.pauseAtStart,
-                p.persistLogs,
-                p.activeActive,
-                p.logTriggerSizeMB,
-                p.storageConnectionString,
-                p.currentVersion,
-                p.upgradeToVersion,
-                sharded,
-                p.serviceCheckpointPath,
-                p.serviceProjectPath
-            );
+#if MEASURE
+                InitializeMetric(
+                    p.serviceReceiveFromPort,
+                    p.serviceSendToPort,
+                    p.serviceName,
+                    p.serviceLogPath,
+                    p.createService,
+                    p.persistLogs,
+                    p.activeActive,
+                    p.logTriggerSizeMB,
+                    p.storageConnectionString,
+                    p.currentVersion,
+                    p.upgradeToVersion,
+                    sharded,
+                    p.serviceCheckpointPath,
+                    p.serviceProjectPath,
+                    @"E:\Studium\Master\Studienprojekt\Plugins");
+#else
+                Initialize(
+                    p.serviceReceiveFromPort,
+                    p.serviceSendToPort,
+                    p.serviceName,
+                    p.serviceLogPath,
+                    p.createService,
+                    p.pauseAtStart,
+                    p.persistLogs,
+                    p.activeActive,
+                    p.logTriggerSizeMB,
+                    p.storageConnectionString,
+                    p.currentVersion,
+                    p.upgradeToVersion,
+                    sharded,
+                    p.serviceCheckpointPath,
+                    p.serviceProjectPath
+                );
+#endif
+
             return;
         }
 
@@ -4623,6 +4661,247 @@ namespace Ambrosia
                 _checkpointingStrategy.Dispose();
             }
         }
+
+        /*public void InitializeMetric2(int serviceReceiveFromPort,
+            int serviceSendToPort,
+            string serviceName,
+            string serviceLogPath,
+            bool? createService,
+            bool persistLogs,
+            bool activeActive,
+            long currentVersion,
+            long upgradeToVersion,
+            bool sharded,
+            string serviceCheckpointPath = "",
+            string serviceProjectPath = "",
+            string servicePluginPath = "",
+            Dictionary<string, object> additionalStrategyParams = null
+        )
+        {
+            InitializeLogWriterStatics();
+            if (LogReaderStaticPicker.curStatic == null || LogWriterStaticPicker.curStatic == null)
+            {
+                OnError(UnexpectedError, "Must specify log storage type");
+            }
+            _runningRepro = true; // Opposing to normal "Initialize" we do not want to connect to Azure to load any data. We effectively do a repro run but hide it as normal execution!
+            _currentVersion = currentVersion;
+            _upgradeToVersion = upgradeToVersion;
+            _upgrading = (_currentVersion < _upgradeToVersion);
+            _persistLogs = persistLogs;
+            _activeActive = activeActive;
+            if (StartupParamOverrides.ICLogLocation == null)
+            {
+                _serviceLogPath = serviceLogPath;
+            }
+            else
+            {
+                _serviceLogPath = StartupParamOverrides.ICLogLocation;
+            }
+            if (StartupParamOverrides.receivePort == -1)
+            {
+                _localServiceReceiveFromPort = serviceReceiveFromPort;
+            }
+            else
+            {
+                _localServiceReceiveFromPort = StartupParamOverrides.receivePort;
+            }
+            if (StartupParamOverrides.sendPort == -1)
+            {
+                _localServiceSendToPort = serviceSendToPort;
+            }
+            else
+            {
+                _localServiceSendToPort = StartupParamOverrides.sendPort;
+            }
+            _serviceName = serviceName;
+            _sharded = sharded;
+            _coral = ClientLibrary;
+
+            Trace.TraceInformation("Logs directory: {0}", _serviceLogPath);
+
+            createService = true; // Opposing to the normal "Initialize" we do not want to replay the stored entries automatically but do so manually via faked input streams.
+            _createService = createService.Value;
+            
+            AddAsyncInputEndpoint(AmbrosiaDataInputsName, new AmbrosiaInput(this, "data"));
+            AddAsyncInputEndpoint(AmbrosiaControlInputsName, new AmbrosiaInput(this, "control"));
+            AddAsyncOutputEndpoint(AmbrosiaDataOutputsName, new AmbrosiaOutput(this, "data"));
+            AddAsyncOutputEndpoint(AmbrosiaControlOutputsName, new AmbrosiaOutput(this, "control"));
+            
+            // Fake Azure CloudTable connection
+            _serviceInstanceTable = new ShimCloudTable();
+            ShimCloudTable.AllInstances.CreateIfNotExistsAsync = async (table) => true;
+            ShimCloudTable.AllInstances.ExecuteAsyncTableOperation = async (table, operation) =>
+            {
+                var result = new TableResult();
+                result.Etag = operation.Entity.ETag;
+                result.Result = operation.Entity;
+                result.HttpStatusCode = 200;
+                return result;
+            };
+            
+            // Fake CRA connection
+            _coral = new ShimCRAClientLibrary();
+            ShimCRAClientLibrary.AllInstances.GetConnectionsFromVertexAsyncString = async (craLibrary, vertex) => new System.Collections.Generic.List<ConnectionInfo>()
+            {
+                new ConnectionInfo("analytics", AmbrosiaControlOutputsName, "analytics",AmbrosiaControlInputsName),
+                new ConnectionInfo("analytics", AmbrosiaControlOutputsName, "tweetsource",AmbrosiaControlInputsName),
+                new ConnectionInfo("analytics", AmbrosiaControlOutputsName, "twitterdashboard", AmbrosiaControlInputsName),
+                new ConnectionInfo("analytics", AmbrosiaDataOutputsName, "analytics", AmbrosiaDataInputsName),
+                new ConnectionInfo("analytics", AmbrosiaDataOutputsName, "tweetsource", AmbrosiaDataInputsName),
+                new ConnectionInfo("analytics", AmbrosiaDataOutputsName, "twitterdashboard", AmbrosiaDataInputsName),
+            };
+            ShimCRAClientLibrary.AllInstances.ConnectAsyncStringStringStringString = async (craLibrary, fromVertex, fromEndpoint, toVertex, toEndpoint) =>
+            {
+                return CRAErrorCode.Success;
+            };
+            
+            // Connect to the fake networkstream for all messages from the logs
+            NetworkStream stream = new NetworkStream(new Socket(SocketType.Stream, ProtocolType.Tcp));
+            
+            (new Task(() => FromDataStreamAsync(stream, "", new CancellationToken()))).Start();
+
+            int logSize;
+            object _logSize = null;
+            additionalStrategyParams?.TryGetValue("LogSize", out _logSize);
+            logSize = int.Parse(_logSize?.ToString() ?? "8");
+            
+            _checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(
+                LogDirectory(_currentVersion, 0),
+                new AmbrosiaTrace(LogDirectory(_currentVersion, 0)),
+                serviceProjectPath, serviceLogPath, new CSharpProjectUtil(),
+                AmbrosiaLogUtil.GetInstance(), logSize * 1024 * 1024);
+            
+            try
+            {
+                RecoverOrStartAsync().Wait();
+            }
+            finally
+            {
+                _checkpointingStrategy.Dispose();
+            }
+        }*/
+
+        public void InitializeMetric(int serviceReceiveFromPort,
+            int serviceSendToPort,
+            string serviceName,
+            string serviceLogPath,
+            bool? createService,
+            bool persistLogs,
+            bool activeActive,
+            long logTriggerSizeMB,
+            string storageConnectionString,
+            long currentVersion,
+            long upgradeToVersion,
+            bool sharded,
+            string serviceCheckpointPath = "",
+            string serviceProjectPath = "",
+            string servicePluginPath = "",
+            Dictionary<string, object> additionalStrategyParams = null
+        )
+        {
+            InitializeLogWriterStatics();
+
+            if (LogReaderStaticPicker.curStatic == null || LogWriterStaticPicker.curStatic == null)
+            {
+                OnError(UnexpectedError, "Must specify log storage type");
+            }
+            _runningRepro = true; // Opposing to normal "Initialize" we do not want to connect to Azure to load any data. We effectively do a repro run but hide it as normal execution!
+            _currentVersion = currentVersion;
+            _upgradeToVersion = upgradeToVersion;
+            _upgrading = (_currentVersion < _upgradeToVersion);
+            _persistLogs = true;
+            _activeActive = false;
+            if (StartupParamOverrides.ICLogLocation == null)
+            {
+                _serviceLogPath = serviceLogPath;
+            }
+            else
+            {
+                _serviceLogPath = StartupParamOverrides.ICLogLocation;
+            }
+            if (StartupParamOverrides.receivePort == -1)
+            {
+                _localServiceReceiveFromPort = serviceReceiveFromPort;
+            }
+            else
+            {
+                _localServiceReceiveFromPort = StartupParamOverrides.receivePort;
+            }
+            if (StartupParamOverrides.sendPort == -1)
+            {
+                _localServiceSendToPort = serviceSendToPort;
+            }
+            else
+            {
+                _localServiceSendToPort = StartupParamOverrides.sendPort;
+            }
+            _serviceName = serviceName;
+            _storageConnectionString = storageConnectionString;
+            _sharded = sharded;
+            _coral = ClientLibrary;
+
+            Trace.TraceInformation("Logs directory: {0}", _serviceLogPath);
+
+            AddAsyncInputEndpoint(AmbrosiaDataInputsName, new AmbrosiaInput(this, "data"));
+            AddAsyncInputEndpoint(AmbrosiaControlInputsName, new AmbrosiaInput(this, "control"));
+            AddAsyncOutputEndpoint(AmbrosiaDataOutputsName, new AmbrosiaOutput(this, "data"));
+            AddAsyncOutputEndpoint(AmbrosiaControlOutputsName, new AmbrosiaOutput(this, "control"));
+            
+            Trace.TraceInformation("Logs directory: {0}", _serviceLogPath);
+
+            // Opposing to the normal "Initialize" we do not want to replay the stored entries automatically but do so manually via faked input streams.
+            _createService = true;
+            
+            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath, servicePluginPath, additionalStrategyParams);
+            try
+            {
+                var thread = new Thread(() =>
+                {
+                    Console.WriteLine("Waiting to start replay");
+                    while (_committer == null || _committer._logStream == null) {
+                        Thread.Sleep(100);
+                    }
+                    Console.WriteLine("Starting replay");
+                    // Replay recorded binary messages
+                    var path = @"C:\Logs\Dummy\";
+
+                    foreach (var file in Directory.EnumerateFiles(path)
+                        .OrderBy(file => int.Parse(file.Substring(file.LastIndexOf(@"\") + 1))))
+                    {
+                        var inputFlexBuffer = new FlexReadBuffer();
+                        var id = int.Parse(file.Substring(file.LastIndexOf(@"\") + 1));
+                        var stream = new FileStream(file, FileMode.Open);
+                        var inputRecord = new InputConnectionRecord();
+                        inputRecord.LastProcessedID = id;
+                        inputRecord.LastProcessedReplayableID = id;
+
+                        try
+                        {
+                            FlexReadBuffer.DeserializeAsync(stream, inputFlexBuffer).Wait();
+                            ProcessInputMessageAsync(inputRecord, "dummy", inputFlexBuffer).Wait();
+                        }
+                        catch
+                        {
+                            Debugger.Break();
+                        }
+                    }
+                    Console.WriteLine("Finished replay");
+                });
+
+                thread.Start();
+                Console.WriteLine("Start RecoverOrStartAsync");
+                _runningRepro = false;
+                SetupAzureConnections();
+                _runningRepro = true;
+                
+                RecoverOrStartAsync().Wait();
+                Console.WriteLine("Finished RecoverOrStartAsync");
+            }
+            finally
+            {
+                _checkpointingStrategy.Dispose();
+            }
+        }
         
         private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath, string pluginPath = "", Dictionary<string, object> additionalArgs = null) {
 #if DEBUG
@@ -4639,8 +4918,11 @@ namespace Ambrosia
             // -- --
             
             // -- LogSize Checkpointing Strategy --
-            //_checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 8 * 1024);
-            // -- --
+            int logSize;
+            additionalArgs.TryGetValue("LogSize", out var _logSize);
+            logSize = int.Parse(_logSize?.ToString() ?? "512");
+            _checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), logSize * 1024 * 1024);
+            // -- -- */
             
             // -- (Location Concerning) Invariant Checkpointing Strategy --
             /*bool trainPhase;
@@ -4656,7 +4938,7 @@ namespace Ambrosia
             // -- -- */
             
             // -- Provenance Supported Strategies --
-            string previousMethodInformationFilePath;
+            /*string previousMethodInformationFilePath;
             additionalArgs.TryGetValue("previousMethods", out var _previousMethodInformationFilePath);
             previousMethodInformationFilePath = _previousMethodInformationFilePath.ToString();
             bool trainPhase;
@@ -4666,7 +4948,7 @@ namespace Ambrosia
             // _checkpointingStrategy = new WhyDiffStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), previousMethodInformationFilePath);
             // previousMethodInformationFilePath = null;
             _checkpointingStrategy = new WhyDiffDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase);
-            // -- --
+            // -- -- */
 #if DEBUG
             Console.WriteLine("Checkpointing strategy initialized");
 #endif

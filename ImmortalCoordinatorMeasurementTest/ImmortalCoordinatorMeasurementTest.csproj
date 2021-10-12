@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net472</TargetFramework>
+        <Configurations>Debug;Release;Measure</Configurations>
+        <Platforms>x64;AnyCPU</Platforms>
+        <RootNamespace>SupportingImmortalCoordinator</RootNamespace>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+      <PlatformTarget>AnyCPU</PlatformTarget>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\AmbrosiaLib\Ambrosia\AmbrosiaLib.csproj" />
+        <ProjectReference Include="..\AzureBlobsLogPicker\AzureBlobsLogPicker.csproj" />
+        <ProjectReference Include="..\GenericLogPicker\GenericLogPicker.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.CRA" Version="2020.9.24.1" />
+        <PackageReference Include="Microsoft.Build.Locator" Version="1.2.2" />
+        <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="3.9.0-2.final" />
+        <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="3.9.0-2.final" />
+    </ItemGroup>
+    
+    <ItemGroup>
+        <ProjectReference Include="../../TimeTravelDebuggingStudienprojekt/AnalyticsInvariants/AnalyticsInvariants.csproj">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </ProjectReference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- Packages for Testcases -->
+        <PackageReference Include="NUnit" Version="3.12.0" />
+        <PackageReference Include="NUnit3TestAdapter" Version="3.16.1" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="16.5.0" />
+    </ItemGroup>
+
+</Project>

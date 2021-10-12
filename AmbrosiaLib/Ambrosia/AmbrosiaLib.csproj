@@ -14,6 +14,7 @@
   <PropertyGroup Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(TargetFramework)', '^netstandard\d'))">
     <DefineConstants>$(DefineConstants);NETSTANDARD</DefineConstants>
   </PropertyGroup>
+  
   <ItemGroup>
     <!-- Packages for Code-Tasks (Analyze the code) -->
     <PackageReference Include="Microsoft.Build.Locator" Version="1.2.2" />
@@ -24,6 +25,8 @@
     <PackageReference Include="Microsoft.CodeAnalysis.Scripting" Version="3.9.0-2.final" />
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="3.9.0-2.final" />
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="3.9.0-2.final" />
+
+    <PackageReference Include="Microsoft.QualityTools.Testing.Fakes" Version="16.11.230815" />
     
     <PackageReference Include="Azure.Storage.Blobs" Version="12.4.4" />
     <PackageReference Include="Microsoft.VisualStudio.Threading">
@@ -57,5 +60,30 @@
     <Reference Include="Microsoft.CodeAnalysis, Version=3.9.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35">
       <HintPath>bin\x64\Debug\net472\Microsoft.CodeAnalysis.dll</HintPath>
     </Reference>
+    <Reference Include="Microsoft.WindowsAzure.Storage.Fakes, Version=9.3.2.0, Culture=neutral, PublicKeyToken=0ae41878053f6703">
+      <HintPath>FakesAssemblies\Microsoft.WindowsAzure.Storage.Fakes.dll</HintPath>
+    </Reference>
+    <Reference Include="CRA.ClientLibrary">
+      <HintPath>FakeAssemblies\CRA.ClientLibrary.Fakes.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalDesignTimeBuildInput Remove="FakesAssemblies\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="FakesAssemblies\Azure.Storage.Blobs.Fakes.dll" />
+    <Content Include="FakesAssemblies\Azure.Storage.Blobs.Fakes.fakesconfig" />
+    <Content Include="FakesAssemblies\Azure.Storage.Blobs.Fakes.messages" />
+    <Content Include="FakesAssemblies\Azure.Storage.Blobs.Fakes.xml" />
+    <Content Include="FakesAssemblies\Microsoft.WindowsAzure.Storage.Fakes.dll" />
+    <Content Include="FakesAssemblies\Microsoft.WindowsAzure.Storage.Fakes.fakesconfig" />
+    <Content Include="FakesAssemblies\Microsoft.WindowsAzure.Storage.Fakes.messages" />
+    <Content Include="FakesAssemblies\Microsoft.WindowsAzure.Storage.Fakes.xml" />
+    <Content Include="FakesAssemblies\CRA.ClientLibrary.Fakes.dll" />
+    <Content Include="FakesAssemblies\CRA.ClientLibrary.Fakes.fakesconfig" />
+    <Content Include="FakesAssemblies\CRA.ClientLibrary.Fakes.messages" />
+    <Content Include="FakesAssemblies\CRA.ClientLibrary.Fakes.xml" />
   </ItemGroup>
 </Project>

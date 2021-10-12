@@ -54,8 +54,15 @@ namespace SupportingImmortalCoordinator
                     StartupParamOverrides.ICCheckpointLocation, StartupParamOverrides.ICProjectLocation, _pluginPath, additionalCheckpointingParams);
                 return;
             }
-            
-            ParseAndValidateOptions(args);
+
+            if (firstArg.Equals("MeasureInstance"))
+            {
+                ParseAndValidateOptions(args.Skip(1).ToArray());
+            }
+            else
+            {
+                ParseAndValidateOptions(args);
+            }
 
             switch (_logStorageType)
             {
@@ -123,6 +130,25 @@ namespace SupportingImmortalCoordinator
                     type = Type.GetType(_secureNetworkClassName);
                 }
                 descriptor = (ISecureStreamConnectionDescriptor)Activator.CreateInstance(type);
+            }
+
+            if (firstArg.Equals("MeasureInstance"))
+            {
+                var myRuntime = new AmbrosiaRuntime();
+                /*myRuntime.InitializeMetric(StartupParamOverrides.receivePort, StartupParamOverrides.sendPort,
+                    _instanceName, StartupParamOverrides.ICLogLocation, false, false, false,
+                    _currentVersion, _currentVersion, false, StartupParamOverrides.ICCheckpointLocation,
+                    StartupParamOverrides.ICProjectLocation, _pluginPath, additionalCheckpointingParams);*/
+                
+                var metricWorker = new CRAWorker
+                (replicaName, _ipAddress, _port,
+                    new CRA.DataProvider.Azure.AzureDataProvider(storageConnectionString), descriptor, connectionsPoolPerWorker);
+
+                metricWorker.DisableDynamicLoading(); 
+                metricWorker.SideloadVertex(myRuntime, "ambrosia");
+
+                metricWorker.Start();
+                return;
             }
 
             var dataProvider = new CRA.DataProvider.Azure.AzureDataProvider(storageConnectionString);
