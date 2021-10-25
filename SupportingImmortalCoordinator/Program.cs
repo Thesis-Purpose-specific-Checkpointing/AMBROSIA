@@ -176,6 +176,7 @@ namespace SupportingImmortalCoordinator
                 { "rp|receivePort=", "The service receive from port override.", rp => StartupParamOverrides.receivePort = int.Parse(rp) },
                 { "sp|sendPort=", "The service send to port override.", sp => StartupParamOverrides.sendPort = int.Parse(sp) },
                 { "l|log=", "The service log path override.", l => StartupParamOverrides.ICLogLocation = l},
+                { "cp|cachePath=", "The service cache path override.", cp => StartupParamOverrides.ICCacheLocation = cp },
                 { "lts|logTriggerSize=", "Log trigger size (in MBs).", lts => StartupParamOverrides.LogTriggerSizeMB = long.Parse(lts) },
                 { "lst|logStorageType=", "Can be set to files or blobs. Defaults to files", lst => _logStorageType = (LogStorageOptions) Enum.Parse(typeof(LogStorageOptions), lst, true)},
                

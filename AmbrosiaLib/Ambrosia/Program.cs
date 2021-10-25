@@ -3043,6 +3043,7 @@ namespace Ambrosia
                     }
                     if (detectedEOF)
                     {
+                        Console.WriteLine("Finished Log");
                         // Move to the next log file for reading only. We may need to take a checkpoint
                         state.LastLogFile++;
                         replayStream.Dispose();
@@ -3253,10 +3254,14 @@ namespace Ambrosia
                     var staticStrategyStopwatch = Stopwatch.StartNew();
 
                     @event.AddAdditionalParams(additionalParams);
-                    var staticResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, @event);
-
+                    
                     staticStrategyStopwatch.Stop();
-                    Console.WriteLine($"Stopwatch (StaticStrategy): {staticStrategyStopwatch.ElapsedMilliseconds}ms");
+                    Console.WriteLine($"Preparation of the event for the DynamicStrategy took {staticStrategyStopwatch.ElapsedMilliseconds} ms ({staticStrategyStopwatch.ElapsedTicks} Ticks).");
+                    
+                    staticStrategyStopwatch = Stopwatch.StartNew();
+                    var staticResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, @event);
+                    staticStrategyStopwatch.Stop();
+                    Console.WriteLine($"Execution of DynamicStrategy took {staticStrategyStopwatch.ElapsedMilliseconds} ms ({staticStrategyStopwatch.ElapsedTicks} Ticks).");
                     
                     return staticResult;
 #else
@@ -3275,10 +3280,13 @@ namespace Ambrosia
                     var _state = await GetComponentStateAsync();
                     @event.AddAdditionalParams(additionalParams);
                     
-                    var dynamicResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, @event);
-                    
                     dynamicStrategyStopwatch.Stop();
-                    Console.WriteLine($"Stopwatch (DynamicStrategy): {dynamicStrategyStopwatch.ElapsedMilliseconds}ms");
+                    Console.WriteLine($"Gather of state for DynamicStrategy took {dynamicStrategyStopwatch.ElapsedMilliseconds} ms ({dynamicStrategyStopwatch.ElapsedTicks} Ticks).");
+                    
+                    dynamicStrategyStopwatch = Stopwatch.StartNew();
+                    var dynamicResult = await strategy.ShouldTakeCheckpoint(state.TotalProcessedEvents, _state, @event);
+                    dynamicStrategyStopwatch.Stop();
+                    Console.WriteLine($"Execution of DynamicStrategy took {dynamicStrategyStopwatch.ElapsedMilliseconds} ms ({dynamicStrategyStopwatch.ElapsedTicks} Ticks).");
 
                     return dynamicResult;
 #else
@@ -3966,7 +3974,15 @@ namespace Ambrosia
             while (true)
             {
                 await FlexReadBuffer.DeserializeAsync(inputRecord.DataConnectionStream, inputFlexBuffer, ct);
+#if RELEASE
+                Stopwatch watch = new Stopwatch();
+                watch.Start();
+#endif
                 await ProcessInputMessageAsync(inputRecord, inputName, inputFlexBuffer);
+#if RELEASE
+                watch.Stop();
+                Console.WriteLine($"ProcessInputMessageAsync took {watch.ElapsedMilliseconds}ms ({watch.ElapsedTicks} ticks).");
+#endif
             }
         }
 
@@ -4509,6 +4525,10 @@ namespace Ambrosia
                        Dictionary<string, object> additionalStrategyParams = null
                        )
         {
+#if RELEASE
+            Stopwatch watch = new Stopwatch();
+            watch.Start();
+#endif
             if (LogReaderStaticPicker.curStatic == null || LogWriterStaticPicker.curStatic == null)
             {
                 OnError(UnexpectedError, "Must specify log storage type");
@@ -4526,6 +4546,10 @@ namespace Ambrosia
             {
                 Trace.TraceInformation("Ready ...");
             }
+            if (serviceProjectPath == null || "".Equals(serviceProjectPath))
+            {
+                serviceProjectPath = StartupParamOverrides.ICProjectLocation;
+            }
             _persistLogs = persistLogs;
             _activeActive = activeActive;
             if (StartupParamOverrides.ICLogLocation == null)
@@ -4535,6 +4559,16 @@ namespace Ambrosia
             else
             {
                 _serviceLogPath = StartupParamOverrides.ICLogLocation;
+            }
+
+            string serviceCachePath;
+            if (StartupParamOverrides.ICCacheLocation == null)
+            {
+                serviceCachePath = serviceLogPath;
+            }
+            else
+            {
+                serviceCachePath = StartupParamOverrides.ICCacheLocation;
             }
             if (StartupParamOverrides.receivePort == -1)
             {
@@ -4576,7 +4610,11 @@ namespace Ambrosia
             AddAsyncOutputEndpoint(AmbrosiaControlOutputsName, new AmbrosiaOutput(this, "control"));
             _createService = createService.Value;
             
-            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath, servicePluginPath, additionalStrategyParams);
+            InitializeCheckpointStrategy(_currentVersion, serviceProjectPath, serviceLogPath, serviceCachePath, servicePluginPath, additionalStrategyParams);
+#if RELEASE
+            watch.Stop();
+            Console.WriteLine($"Initialization took {watch.ElapsedMilliseconds}ms ({watch.ElapsedTicks} ticks).");
+#endif
             try
             {
                 RecoverOrStartAsync().Wait();
@@ -4610,8 +4648,18 @@ namespace Ambrosia
             _serviceName = serviceName;
             _sharded = false;
             _createService = false;
+
+            string __serviceCachePath;
+            if (StartupParamOverrides.ICLogLocation == null)
+            {
+                __serviceCachePath = serviceLogPath;
+            }
+            else
+            {
+                __serviceCachePath = StartupParamOverrides.ICCacheLocation;
+            }
             
-            InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath, servicePluginPath, additionalStrategyParams);
+            InitializeCheckpointStrategy(version, serviceProjectPath, serviceLogPath, __serviceCachePath, servicePluginPath, additionalStrategyParams);
             
             InitializeLogWriterStatics();
             try
@@ -4624,52 +4672,124 @@ namespace Ambrosia
             }
         }
         
-        private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath, string pluginPath = "", Dictionary<string, object> additionalArgs = null) {
+        private void InitializeCheckpointStrategy(long version, string serviceProjectPath, string serviceLogPath, string serviceCachePath, string pluginPath = "", Dictionary<string, object> additionalArgs = null) {
 #if DEBUG
             Console.WriteLine("Initialize checkpointing strategy");
 #endif
             if (additionalArgs == null)
             {
                 additionalArgs = new Dictionary<string, object>();
+#if MEASURE
+                Console.Error.WriteLine("No additionalArgs were given. For measurement the args are required to determine the correct strategy.");
+                throw new ArgumentException("No additionalArgs were given to select a checkpointing strategy.");
+#endif
             }
 
+            bool trainPhase;
+            float threshold;
+            string previousMethodInformationFilePath;
+
+#if MEASURE
+            additionalArgs.TryGetValue("Strategy", out var strategy);
+
+            switch (strategy?.ToString())
+            {
+                case "LogSize":
+                    _checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 1 * 1024 * 1024);
+                    break;
+                case "UIS":
+                    (trainPhase, threshold) = GetInvariantArgs(additionalArgs);
+                    _checkpointingStrategy = new UnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+                    break;
+                case "LCUIS":
+                    (trainPhase, threshold) = GetInvariantArgs(additionalArgs);
+                    _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+                    break;
+                case "LCUISWM":
+                    (trainPhase, threshold) = GetInvariantArgs(additionalArgs);
+                    _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+                    break;
+                case "LCUISWMEC":
+                    (trainPhase, threshold) = GetInvariantArgs(additionalArgs);
+                    _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationAndEffectiveChangesStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+                    break;
+                case "DuplicateWriteAccess":
+                    _checkpointingStrategy = new DuplicateWriteAccessStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance());
+                    break;
+                case "WhyDiff1":
+                    (_, previousMethodInformationFilePath) = GetProvenanceArgs(additionalArgs);
+                    _checkpointingStrategy = new WhyDiffStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), previousMethodInformationFilePath);
+                    break;
+                case "WhyDiff2":
+                    (trainPhase, _) = GetProvenanceArgs(additionalArgs);
+                    _checkpointingStrategy = new WhyDiffDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase);
+                    break;
+                default:
+                    throw new ArgumentException($"No strategy with name {strategy.ToString()} implemented.");
+            }
+            
+            return;
+            
+#endif
             // -- Dummy Checkpointing Strategies --
-            //_checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
-            //_checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
+            //_checkpointingStrategy = new DummyStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
+            //_checkpointingStrategy = new DummyDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), true);
             // -- --
             
             // -- LogSize Checkpointing Strategy --
-            //_checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 8 * 1024);
-            // -- --
+            // _checkpointingStrategy = new LogSizeStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), 1 * 1024 * 1024);
+            // -- -- */
             
             // -- (Location Concerning) Invariant Checkpointing Strategy --
-            /*bool trainPhase;
+            additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
+            trainPhase = bool.Parse(_trainPhase.ToString());
+            additionalArgs.TryGetValue("Threshold", out var _threshold);
+            threshold = float.Parse(_threshold.ToString());
+            // _checkpointingStrategy = new UnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationAndEffectiveChangesStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
+            // -- -- */
+            
+            // -- Provenance Supported Strategies --
+            /*string previousMethodInformationFilePath;
+            additionalArgs.TryGetValue("previousMethods", out var _previousMethodInformationFilePath);
+            previousMethodInformationFilePath = _previousMethodInformationFilePath.ToString();
+            bool trainPhase;
+            additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
+            trainPhase = bool.Parse(_trainPhase.ToString());
+            // _checkpointingStrategy = new DuplicateWriteAccessStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance());
+            // _checkpointingStrategy = new WhyDiffStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), previousMethodInformationFilePath);
+            // previousMethodInformationFilePath = null;
+            _checkpointingStrategy = new WhyDiffDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceCachePath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase);
+            // -- -- */
+#if DEBUG
+            Console.WriteLine("Checkpointing strategy initialized");
+#endif
+        }
+        
+        private (bool trainPhase, float threshold) GetInvariantArgs(Dictionary<string, object> additionalArgs)
+        {
+            bool trainPhase;
             float threshold;
             additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
             trainPhase = bool.Parse(_trainPhase.ToString());
             additionalArgs.TryGetValue("Threshold", out var _threshold);
             threshold = float.Parse(_threshold.ToString());
-            // _checkpointingStrategy = new UnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
-            _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
-            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
-            // _checkpointingStrategy = new LocationConcerningUnholdingInvariantCheckpointingWithMethodInformationAndEffectiveChangesStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), pluginPath, trainPhase, threshold);
-            // -- -- */
             
-            // -- Provenance Supported Strategies --
+            return (trainPhase, threshold);
+        }
+        
+        private (bool trainPhase, string previousMethodInformationFilePath) GetProvenanceArgs(Dictionary<string, object> additionalArgs)
+        {
             string previousMethodInformationFilePath;
             additionalArgs.TryGetValue("previousMethods", out var _previousMethodInformationFilePath);
             previousMethodInformationFilePath = _previousMethodInformationFilePath.ToString();
             bool trainPhase;
             additionalArgs.TryGetValue("TrainPhase", out var _trainPhase);
             trainPhase = bool.Parse(_trainPhase.ToString());
-            // _checkpointingStrategy = new DuplicateWriteAccessStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance());
-            // _checkpointingStrategy = new WhyDiffStaticCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), previousMethodInformationFilePath);
-            // previousMethodInformationFilePath = null;
-            _checkpointingStrategy = new WhyDiffDynamicCheckpointingStrategy<AmbrosiaLogEntry, AmbrosiaEvent>(LogDirectory(version, 0), new AmbrosiaTrace(LogDirectory(version, 0)), serviceProjectPath, serviceLogPath, new CSharpProjectUtil(), AmbrosiaLogUtil.GetInstance(), trainPhase);
-            // -- --
-#if DEBUG
-            Console.WriteLine("Checkpointing strategy initialized");
-#endif
+            
+            return (trainPhase, previousMethodInformationFilePath);
         }
     }
 }

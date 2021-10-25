@@ -21,6 +21,7 @@ namespace Ambrosia
         public static string ICLogLocation = null;
         public static string ICCheckpointLocation = null;
         public static string ICProjectLocation = null;
+        public static string ICCacheLocation = null;
     }
 
     // Constants for leading byte communicated between services;
